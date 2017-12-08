@@ -4948,6 +4948,33 @@ def _find_service_in_cell(context, service_id=None, service_host=None):
     service = None
     found_in_cell = None
 
+    def get_by_host_or_node_name(c):
+        try:
+            service = objects.Service.get_by_compute_host(c, service_host)
+        except exception.NotFound:
+            LOG.debug('Unable to find service with host %s, falling back to '
+                      'compute node search', service_host)
+            compute_nodes = (
+                objects.ComputeNodeList.get_by_hypervisor(c, service_host))
+            if not compute_nodes:
+                raise exception.NotFound()
+            elif len(compute_nodes) > 1:
+                raise exception.ServiceNotUnique()
+            else:
+                compute_node_host = compute_nodes[0].host
+                service = (
+                    objects.Service.get_by_compute_host(c, compute_node_host))
+        else:
+            if service.host != service_host:
+                # NOTE(danms): If we found a service but it is not an
+                # exact match, we may have a case-insensitive backend
+                # database (like mysql) which will end up with us
+                # adding the host-aggregate mapping with a
+                # non-matching hostname.
+                raise exception.ComputeHostNotFound(host=host_name)
+
+        return service
+
     is_uuid = False
     if service_id is not None:
         is_uuid = uuidutils.is_uuid_like(service_id)
@@ -4956,8 +4983,7 @@ def _find_service_in_cell(context, service_id=None, service_host=None):
         else:
             lookup_fn = lambda c: objects.Service.get_by_id(c, service_id)
     elif service_host is not None:
-        lookup_fn = lambda c: (
-            objects.Service.get_by_compute_host(c, service_host))
+        lookup_fn = get_by_host_or_node_name
     else:
         LOG.exception('_find_service_in_cell called with no search parameters')
         # This is intentionally cryptic so we don't leak implementation details
@@ -5564,21 +5590,13 @@ class AggregateAPI(base.Base):
             mapping = objects.HostMapping.get_by_host(context, host_name)
             nova_context.set_target_cell(context, mapping.cell_mapping)
             service = objects.Service.get_by_compute_host(context, host_name)
-        except exception.HostMappingNotFound:
+        except (exception.HostMappingNotFound, exception.ComputeHostNotFound):
             try:
                 # NOTE(danms): This targets our cell
                 service = _find_service_in_cell(context,
                                                 service_host=host_name)
             except exception.NotFound:
                 raise exception.ComputeHostNotFound(host=host_name)
-
-        if service.host != host_name:
-            # NOTE(danms): If we found a service but it is not an
-            # exact match, we may have a case-insensitive backend
-            # database (like mysql) which will end up with us
-            # adding the host-aggregate mapping with a
-            # non-matching hostname.
-            raise exception.ComputeHostNotFound(host=host_name)
 
         aggregate = objects.Aggregate.get_by_id(context, aggregate_id)
 
@@ -5644,11 +5662,21 @@ class AggregateAPI(base.Base):
         compute_utils.notify_about_aggregate_update(context,
                                                     "removehost.start",
                                                     aggregate_payload)
+
         # validates the host; HostMappingNotFound or ComputeHostNotFound
         # is raised if invalid
-        mapping = objects.HostMapping.get_by_host(context, host_name)
-        nova_context.set_target_cell(context, mapping.cell_mapping)
-        objects.Service.get_by_compute_host(context, host_name)
+        try:
+            mapping = objects.HostMapping.get_by_host(context, host_name)
+            nova_context.set_target_cell(context, mapping.cell_mapping)
+            service = objects.Service.get_by_compute_host(context, host_name)
+        except (exception.HostMappingNotFound, exception.ComputeHostNotFound):
+            try:
+                # NOTE(danms): This targets our cell
+                service = _find_service_in_cell(context,
+                                                service_host=host_name)
+            except exception.NotFound:
+                raise exception.ComputeHostNotFound(host=host_name)
+
         aggregate = objects.Aggregate.get_by_id(context, aggregate_id)
 
         compute_utils.notify_about_aggregate_action(
