@@ -806,16 +806,18 @@ class HostManager(object):
                 # this field for the first time
                 host_state.update(compute,
                                   dict(service),
-                                  self._get_aggregates_info(host),
+                                  self._get_aggregates_info(compute),
                                   self._get_instance_info(context, compute))
 
                 seen_nodes.add(state_key)
 
         return (host_state_map[host] for host in seen_nodes)
 
-    def _get_aggregates_info(self, host):
-        return [self.aggs_by_id[agg_id] for agg_id in
-                self.host_aggregates_map[host]]
+    def _get_aggregates_info(self, compute):
+        host_aggregates = (
+            self.host_aggregates_map[compute.host] |
+            self.host_aggregates_map[compute.hypervisor_hostname])
+        return [self.aggs_by_id[agg_id] for agg_id in host_aggregates]
 
     def _get_cell_mapping_for_host(self, context, host_name):
         """Finds the CellMapping for a particular host name
