@@ -393,6 +393,7 @@ class HypervisorsController(wsgi.Controller):
             try:
                 instances = self.host_api.instance_get_all_by_host(context,
                     compute_node.host)
+                instances = [ i for i in instances if i.node == id ]
                 service = self.host_api.service_get_by_compute_host(
                     context, compute_node.host)
             except exception.HostMappingNotFound as e:
