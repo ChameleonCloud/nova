@@ -1609,7 +1609,7 @@ class IronicDriver(virt_driver.ComputeDriver):
             try:
                 self.ironicclient.call("node.vif_attach", node.uuid,
                                        port_id, retry_on_conflict=False)
-            except ironic.exc.BadRequest as e:
+            except (ironic.exc.BadRequest, ironic.exc.InternalServerError) as e:
                 # NOTE(danms): If we race with ironic startup, there
                 # will be no ironic-conductor running, which will
                 # give us a failure to do this plug operation. So,
