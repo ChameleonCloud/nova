@@ -646,7 +646,7 @@ class ComputeTaskManager(base.Base):
                     # We have an empty list of hosts, so this instance has
                     # failed to build.
                     msg = ("Exhausted all hosts available for retrying build "
-                           "failures for instance %(instance_uuid)s." %
+                           "failures for instance %(instance_uuid)s. Please submit a ticket with https://www.chameleoncloud.org/user/help/." %
                            {"instance_uuid": instances[0].uuid})
                     raise exception.MaxRetriesExceeded(reason=msg)
             else:
@@ -737,7 +737,7 @@ class ComputeTaskManager(base.Base):
                 if not host_available:
                     # No more available hosts for retrying the build.
                     msg = ("Exhausted all hosts available for retrying build "
-                           "failures for instance %(instance_uuid)s." %
+                           "failures for instance %(instance_uuid)s. Please submit a ticket with https://www.chameleoncloud.org/user/help/." %
                            {"instance_uuid": instance.uuid})
                     exc = exception.MaxRetriesExceeded(reason=msg)
                     self._cleanup_when_reschedule_fails(
