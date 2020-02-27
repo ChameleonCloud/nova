@@ -1933,7 +1933,7 @@ class ResourceTracker(object):
         self.stats[nodename].build_succeeded()
 
     @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE, fair=True)
-    def claim_pci_devices(self, context, pci_requests, instance_numa_topology):
+    def claim_pci_devices(self, context, pci_requests):
         """Claim instance PCI resources
 
         :param context: security context
