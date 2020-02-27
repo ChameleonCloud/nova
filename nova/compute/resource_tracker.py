@@ -158,7 +158,7 @@ class ResourceTracker(object):
         self.assigned_resources = collections.defaultdict(
             lambda: collections.defaultdict(set))
 
-    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
+    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE, fair=True)
     def instance_claim(self, context, instance, nodename, allocations,
                        limits=None):
         """Indicate that some resources are needed for an upcoming compute
@@ -233,7 +233,7 @@ class ResourceTracker(object):
 
         return claim
 
-    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
+    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE, fair=True)
     def rebuild_claim(self, context, instance, nodename, allocations,
                       limits=None, image_meta=None, migration=None):
         """Create a claim for a rebuild operation."""
@@ -242,7 +242,7 @@ class ResourceTracker(object):
                                 migration, allocations, move_type='evacuation',
                                 limits=limits, image_meta=image_meta)
 
-    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
+    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE, fair=True)
     def resize_claim(self, context, instance, instance_type, nodename,
                      migration, allocations, image_meta=None, limits=None):
         """Create a claim for a resize or cold-migration move.
@@ -254,7 +254,7 @@ class ResourceTracker(object):
                                 migration, allocations, image_meta=image_meta,
                                 limits=limits)
 
-    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
+    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE, fair=True)
     def live_migration_claim(self, context, instance, nodename, migration,
                              limits):
         """Builds a MoveClaim for a live migration.
@@ -559,7 +559,7 @@ class ResourceTracker(object):
         instance.node = None
         instance.save()
 
-    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
+    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE, fair=True)
     def abort_instance_claim(self, context, instance, nodename):
         """Remove usage from the given instance."""
         self._update_usage_from_instance(context, instance, nodename,
@@ -582,7 +582,7 @@ class ResourceTracker(object):
                 dev_pools_obj = self.pci_tracker.stats.to_device_pools_obj()
                 self.compute_nodes[nodename].pci_device_pools = dev_pools_obj
 
-    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
+    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE, fair=True)
     def drop_move_claim(self, context, instance, nodename,
                         instance_type=None, prefix='new_'):
         """Remove usage for an incoming/outgoing migration.
@@ -631,7 +631,7 @@ class ResourceTracker(object):
             ctxt = context.elevated()
             self._update(ctxt, self.compute_nodes[nodename])
 
-    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
+    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE, fair=True)
     def update_usage(self, context, instance, nodename):
         """Update the resource usage and stats after a change in an
         instance
@@ -902,7 +902,7 @@ class ResourceTracker(object):
                               'another host\'s instance!',
                           {'uuid': migration.instance_uuid})
 
-    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
+    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE, fair=True)
     def _update_available_resource(self, context, resources, startup=False):
 
         # initialize the compute node object, creating it
@@ -1759,7 +1759,7 @@ class ResourceTracker(object):
         """Resets the failed_builds stats for the given node."""
         self.stats[nodename].build_succeeded()
 
-    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
+    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE, fair=True)
     def claim_pci_devices(self, context, pci_requests):
         """Claim instance PCI resources
 
@@ -1772,7 +1772,7 @@ class ResourceTracker(object):
         self.pci_tracker.save(context)
         return result
 
-    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
+    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE, fair=True)
     def allocate_pci_devices_for_instance(self, context, instance):
         """Allocate instance claimed PCI resources
 
@@ -1782,7 +1782,7 @@ class ResourceTracker(object):
         self.pci_tracker.allocate_instance(instance)
         self.pci_tracker.save(context)
 
-    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
+    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE, fair=True)
     def free_pci_device_allocations_for_instance(self, context, instance):
         """Free instance allocated PCI resources
 
@@ -1792,7 +1792,7 @@ class ResourceTracker(object):
         self.pci_tracker.free_instance_allocations(context, instance)
         self.pci_tracker.save(context)
 
-    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
+    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE, fair=True)
     def free_pci_device_claims_for_instance(self, context, instance):
         """Free instance claimed PCI resources
 
