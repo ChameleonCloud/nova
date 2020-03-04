@@ -298,7 +298,7 @@ class FilterScheduler(driver.Scheduler):
                   '%(required_count)d instances requested to build.',
                   {'hosts': len(hosts),
                    'required_count': required_count})
-        reason = _('There are not enough hosts available.')
+        reason = _('There are not enough hosts available. To troubleshoot, please see bit.ly/faq-instance-failure')
         raise exception.NoValidHost(reason=reason)
 
     def _cleanup_allocations(self, context, instance_uuids):

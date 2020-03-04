@@ -342,7 +342,7 @@ class ComputeTaskAPI(object):
     def build_instances(self, context, instances, image, filter_properties,
             admin_password, injected_files, requested_networks,
             security_groups, block_device_mapping, legacy_bdm=True,
-            request_spec=None, host_lists=None):
+            request_spec=None, host_lists=None, last_seen_error_message=None):
         image_p = jsonutils.to_primitive(image)
         kwargs = {"instances": instances, "image": image_p,
                   "filter_properties": filter_properties,
@@ -351,7 +351,8 @@ class ComputeTaskAPI(object):
                   "requested_networks": requested_networks,
                   "security_groups": security_groups,
                   "request_spec": request_spec,
-                  "host_lists": host_lists}
+                  "host_lists": host_lists,
+                  "last_seen_error_message": last_seen_error_message}
         version = '1.19'
         if not self.client.can_send_version(version):
             version = '1.18'
