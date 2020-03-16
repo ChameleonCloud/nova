@@ -2209,7 +2209,7 @@ class ComputeManager(manager.Manager):
                     image, filter_properties, admin_password,
                     injected_files, requested_networks, security_groups,
                     block_device_mapping, request_spec=request_spec,
-                    host_lists=[host_list])
+                    host_lists=[host_list], last_seen_error_message=e.kwargs['reason'])
             return build_results.RESCHEDULED
         except (exception.InstanceNotFound,
                 exception.UnexpectedDeletingTaskStateError):
@@ -2629,7 +2629,7 @@ class ComputeManager(manager.Manager):
             self.driver.failed_spawn_cleanup(instance)
             raise exception.BuildAbortException(instance_uuid=instance.uuid,
                     reason=e.format_message())
-        except Exception:
+        except Exception as e:
             LOG.exception('Failure prepping block device',
                           instance=instance)
             # Make sure the async call finishes
@@ -2637,9 +2637,7 @@ class ComputeManager(manager.Manager):
                 network_info.wait(do_raise=False)
                 self.driver.clean_networks_preparation(instance, network_info)
             self.driver.failed_spawn_cleanup(instance)
-            msg = _('Failure prepping block device.')
-            raise exception.BuildAbortException(instance_uuid=instance.uuid,
-                    reason=msg)
+            raise exception.BuildAbortException('Failure prepping block device. ' + str(e))
 
         try:
             yield resources
