@@ -16,6 +16,7 @@
 """Tests for the conductor service."""
 
 import copy
+from unittest import mock
 
 import ddt
 from keystoneauth1 import exceptions as ks_exc
