@@ -6808,6 +6808,7 @@ class ServersControllerCreateTestV237(test.NoDBTestCase):
     These tests are mostly about testing the validation on the 2.37
     server create request with emphasis on negative scenarios.
     """
+
     def setUp(self):
         super(ServersControllerCreateTestV237, self).setUp()
         # Create the server controller.
@@ -7008,6 +7009,7 @@ class ServersControllerCreateTestV257(test.NoDBTestCase):
             new=lambda *args, **kwargs: 1)
 class ServersControllerCreateTestV260(test.NoDBTestCase):
     """Negative tests for creating a server with a multiattach volume."""
+
     def setUp(self):
         super(ServersControllerCreateTestV260, self).setUp()
         self.useFixture(nova_fixtures.NoopQuotaDriverFixture())
