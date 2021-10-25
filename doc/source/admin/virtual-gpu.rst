@@ -303,8 +303,7 @@ Caveats
 
   .. versionchanged:: 25.0.0
 
-   This has been resolved in the Yoga release and backported to Xena. See
-   `bug 1948705`_.
+   This has been resolved in the Yoga release. See `bug 1948705`_.
 
 * Resizing an instance with a new flavor that has vGPU resources doesn't
   allocate those vGPUs to the instance (the instance is created without
