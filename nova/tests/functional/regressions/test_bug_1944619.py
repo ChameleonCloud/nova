@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-import mock
+import fixtures
 
 from nova import exception as nova_exceptions
 from nova.tests.fixtures import libvirt as fakelibvirt
@@ -56,21 +56,32 @@ class TestRollbackWithHWOffloadedOVS(
         self.src = self.computes['src']
         self.dest = self.computes['dest']
 
+        lib_path = "nova.virt.libvirt.driver.LibvirtDriver"
+        funtion_path = "rollback_live_migration_at_source"
+        mock_lib_path = "%s.%s" % (lib_path, funtion_path)
+        self.libvirt_mock = self.useFixture(
+            fixtures.MockPatch(mock_lib_path,
+                               side_effect=fakelibvirt.libvirtError(
+                                defmsg="libVirt duplicated dev error")))
+
+        funtion_path = "pre_live_migration"
+        mock_lib_path = "%s.%s" % (lib_path, funtion_path)
+        self.useFixture(fixtures.MockPatch(
+            mock_lib_path,
+            side_effect=nova_exceptions.DestinationDiskExists(
+                path='/var/non/existent'))
+        )
+
     def test_rollback_pre_live_migration(self):
         self.server = self._create_server(host='src', networks='none')
 
-        lib_path = "nova.virt.libvirt.driver.LibvirtDriver"
-        funtion_path = "pre_live_migration"
-        mock_lib_path_prelive = "%s.%s" % (lib_path, funtion_path)
-        with mock.patch(mock_lib_path_prelive,
-                        side_effect=nova_exceptions.DestinationDiskExists(
-                            path='/var/non/existent')) as mlpp:
-            funtion_path = "rollback_live_migration_at_source"
-            mock_lib_path_rollback = "%s.%s" % (lib_path, funtion_path)
-            with mock.patch(mock_lib_path_rollback) as mlpr:
-                # Live migrate the instance to another host
-                self._live_migrate(self.server,
-                                   migration_expected_state='failed',
-                                   server_expected_state='MIGRATING')
-        mlpr.assert_not_called()
-        mlpp.assert_called_once()
+        # Live migrate the instance to another host
+        self._live_migrate(self.server, migration_expected_state='error',
+                           server_expected_state='MIGRATING')
+        # FIXME(erlon): In the current behavior,
+        # rollback_live_migration_at_source is called if an error happens
+        # during the  pre_live_migration phase on the destination and therefore
+        # triggers the observed bug. rollback_live_migration_at_source should
+        # *not* be called for when errors happen during pre_live_migration
+        # phase.
+        self.libvirt_mock.mock.assert_called_once()
