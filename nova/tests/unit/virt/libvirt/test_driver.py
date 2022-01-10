@@ -7029,26 +7029,6 @@ class LibvirtConnTestCase(test.NoDBTestCase,
 
     @mock.patch.object(
         host.Host, "is_cpu_control_policy_capable", return_value=True)
-    def test_guest_cpu_shares_with_multi_vcpu(self, is_able):
-        self.flags(virt_type='kvm', group='libvirt')
-
-        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
-
-        instance_ref = objects.Instance(**self.test_instance)
-        instance_ref.flavor.vcpus = 4
-        image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
-
-        disk_info = blockinfo.get_disk_info(CONF.libvirt.virt_type,
-                                            instance_ref,
-                                            image_meta)
-
-        cfg = drvr._get_guest_config(instance_ref, [],
-                                     image_meta, disk_info)
-
-        self.assertEqual(4096, cfg.cputune.shares)
-
-    @mock.patch.object(
-        host.Host, "is_cpu_control_policy_capable", return_value=True)
     def test_get_guest_config_with_cpu_quota(self, is_able):
         self.flags(virt_type='kvm', group='libvirt')
 
