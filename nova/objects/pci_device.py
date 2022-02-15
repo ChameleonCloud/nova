@@ -587,6 +587,13 @@ class PciDevice(base.NovaPersistentObject, base.NovaObject):
         caps = jsonutils.loads(caps_json)
         return caps.get('sriov', {})
 
+    @property
+    def mac_address(self):
+        """The MAC address of the PF physical device or None if the device is
+        not a PF or if the MAC is not available.
+        """
+        return self.extra_info.get('mac_address')
+
 
 @base.NovaObjectRegistry.register
 class PciDeviceList(base.ObjectListBase, base.NovaObject):
