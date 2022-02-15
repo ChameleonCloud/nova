@@ -1483,6 +1483,7 @@ class Host(object):
             _get_device_type(cfgdev, address, dev, net_devs, vdpa_devs))
         device.update(_get_device_capabilities(device, dev,
                                                pci_devs, net_devs))
+        device.update(self._get_pf_details(device, address))
         return device
 
     def get_vdpa_nodedev_by_address(

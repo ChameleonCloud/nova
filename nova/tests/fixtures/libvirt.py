@@ -2231,7 +2231,7 @@ class LibvirtFixture(fixtures.Fixture):
 
         self.useFixture(fixtures.MockPatch(
             'nova.pci.utils.get_mac_by_pci_address',
-            side_effect=self.fake_get_mac_by_pci_address))
+            new=self.fake_get_mac_by_pci_address))
 
         # libvirt calls out to sysfs to get the vfs ID during macvtap plug
         self.mock_get_vf_num_by_pci_address = self.useFixture(
