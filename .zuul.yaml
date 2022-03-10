@@ -717,6 +717,11 @@
             irrelevant-files: *nova-base-irrelevant-files
         - tempest-integrated-compute-centos-8-stream:
             irrelevant-files: *nova-base-irrelevant-files
+    periodic-weekly:
+      jobs:
+        # Runs emulation feature functionality test less frequently due
+        # to being the initial release and experimental in nature.
+        - nova-emulation
     experimental:
       jobs:
         - ironic-tempest-bfv:
