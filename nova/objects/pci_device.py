@@ -582,6 +582,11 @@ class PciDevice(base.NovaPersistentObject, base.NovaObject):
         """
         return self.extra_info.get('mac_address')
 
+    def sriov_cap(self):
+        caps_json = self.extra_info.get('capabilities', '{}')
+        caps = jsonutils.loads(caps_json)
+        return caps.get('sriov', {})
+
 
 @base.NovaObjectRegistry.register
 class PciDeviceList(base.ObjectListBase, base.NovaObject):
