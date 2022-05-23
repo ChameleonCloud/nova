@@ -1538,6 +1538,16 @@ class VDPAServersTest(_PCIServersTestBase):
     def test_suspend(self):
         self._test_common(self._suspend_server)
 
+    def test_evacuate(self):
+        self._test_common(self._evacuate_server)
+
+    def test_resize(self):
+        flavor_id = self._create_flavor()
+        self._test_common(self._resize_server, flavor_id)
+
+    def test_cold_migrate(self):
+        self._test_common(self._migrate_server)
+
 
 class PCIServersTest(_PCIServersTestBase):
 
@@ -1837,7 +1847,7 @@ class PCIServersWithSRIOVAffinityPoliciesTest(_PCIServersTestBase):
             num_pci=1, numa_node=pci_numa_node)
         self.start_compute(pci_info=pci_info)
 
-        # request cpu pinning to create a numa toplogy and allow the test to
+        # request cpu pinning to create a numa topology and allow the test to
         # force which numa node the vm would have to be pinned too.
         extra_spec = {
             'hw:cpu_policy': 'dedicated',
@@ -2048,7 +2058,7 @@ class PCIServersWithPortNUMAPoliciesTest(_PCIServersTestBase):
             num_pfs=1, num_vfs=2, numa_node=pci_numa_node)
         self.start_compute(pci_info=pci_info)
 
-        # request cpu pinning to create a numa toplogy and allow the test to
+        # request cpu pinning to create a numa topology and allow the test to
         # force which numa node the vm would have to be pinned too.
         extra_spec = {
             'hw:cpu_policy': 'dedicated',
