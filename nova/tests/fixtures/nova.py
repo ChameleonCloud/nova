@@ -1435,7 +1435,7 @@ class AvailabilityZoneFixture(fixtures.Fixture):
     ``get_availability_zones``.
 
     ``get_instance_availability_zone`` will return the availability_zone
-    requested when creating a server otherwise the instance.availabilty_zone
+    requested when creating a server otherwise the instance.availability_zone
     or default_availability_zone is returned.
     """
 
