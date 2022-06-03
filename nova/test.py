@@ -286,6 +286,7 @@ class TestCase(base.BaseTestCase):
         quota.UID_QFD_POPULATED_CACHE_ALL = False
 
         self.useFixture(nova_fixtures.GenericPoisonFixture())
+        self.useFixture(nova_fixtures.SysFsPoisonFixture())
 
         # make sure that the wsgi app is fully initialized for all testcase
         # instead of only once initialized for test worker
