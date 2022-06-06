@@ -6110,7 +6110,7 @@ def _get_service_in_cell_by_host(context, host_name):
         mapping = objects.HostMapping.get_by_host(context, host_name)
         nova_context.set_target_cell(context, mapping.cell_mapping)
         service = objects.Service.get_by_compute_host(context, host_name)
-    except exception.HostMappingNotFound:
+    except (exception.HostMappingNotFound, exception.ComputeHostNotFound):
         try:
             # NOTE(danms): This targets our cell
             service = _find_service_in_cell(context, service_host=host_name)
@@ -6161,7 +6161,7 @@ def _find_service_in_cell(context, service_id=None, service_host=None):
                 # database (like mysql) which will end up with us
                 # adding the host-aggregate mapping with a
                 # non-matching hostname.
-                raise exception.ComputeHostNotFound(host=host_name)
+                raise exception.ComputeHostNotFound(host=service_host)
 
         return service
 
@@ -6817,16 +6817,9 @@ class AggregateAPI:
         compute_utils.notify_about_aggregate_update(context,
                                                     "addhost.start",
                                                     aggregate_payload)
-
-        service = _get_service_in_cell_by_host(context, host_name)
-        if service.host != host_name:
-            # NOTE(danms): If we found a service but it is not an
-            # exact match, we may have a case-insensitive backend
-            # database (like mysql) which will end up with us
-            # adding the host-aggregate mapping with a
-            # non-matching hostname.
-            raise exception.ComputeHostNotFound(host=host_name)
-
+        # NOTE(jason): This is very hacky, but this call actually has several
+        # important side-effects related to validation ;_;
+        _get_service_in_cell_by_host(context, host_name)
         aggregate = objects.Aggregate.get_by_id(context, aggregate_id)
 
         compute_utils.notify_about_aggregate_action(
@@ -6842,7 +6835,13 @@ class AggregateAPI:
 
         aggregate.add_host(host_name)
         self.query_client.update_aggregates(context, [aggregate])
-        nodes = objects.ComputeNodeList.get_all_by_host(context, host_name)
+        # NOTE(jason): This is a Chameleon-specific modification that enables our
+        # Nova deployment to handle bare metal aggregates. There is likely _actual_
+        # support for this now, but Blazar will still place hosts in Nova aggregates;
+        # once Blazar is adapted to, e.g., integrate against Placement directly,
+        # we can revert this, and the other Nova patches, like get_by_host_or_node_name.
+        nodes = objects.ComputeNodeList.get_all_by_host(
+            context, host_name, try_node_name=True)
         node_name = nodes[0].hypervisor_hostname
         try:
             self.placement_client.aggregate_add_host(
@@ -6930,6 +6929,8 @@ class AggregateAPI:
         compute_utils.notify_about_aggregate_update(context,
                                                     "removehost.start",
                                                     aggregate_payload)
+        # NOTE(jason): This is very hacky, but this call actually has several
+        # important side-effects related to validation ;_;
         _get_service_in_cell_by_host(context, host_name)
         aggregate = objects.Aggregate.get_by_id(context, aggregate_id)
 
@@ -6946,7 +6947,13 @@ class AggregateAPI:
         # we change anything on the nova side because if we did the nova stuff
         # first we can't re-attempt this from the compute API if cleaning up
         # placement fails.
-        nodes = objects.ComputeNodeList.get_all_by_host(context, host_name)
+        # NOTE(jason): This is a Chameleon-specific modification that enables our
+        # Nova deployment to handle bare metal aggregates. There is likely _actual_
+        # support for this now, but Blazar will still place hosts in Nova aggregates;
+        # once Blazar is adapted to, e.g., integrate against Placement directly,
+        # we can revert this, and the other Nova patches, like get_by_host_or_node_name.
+        nodes = objects.ComputeNodeList.get_all_by_host(
+            context, host_name, try_node_name=True)
         node_name = nodes[0].hypervisor_hostname
         try:
             # Anything else this raises is handled in the route handler as
