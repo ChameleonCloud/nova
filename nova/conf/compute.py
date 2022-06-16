@@ -1017,15 +1017,16 @@ exposure due to processing named extents. If this list is empty, then no
 form of VMDK image will be allowed.
 """),
     cfg.BoolOpt('packing_host_numa_cells_allocation_strategy',
-        default=True,
+        default=False,
         help="""
 This option controls allocation strategy used to choose NUMA cells on host for
 placing VM's NUMA cells (for VMs with defined numa topology). By
-default host's NUMA cell with more resources consumed will be chosen first for
-placing attempt. So the host cell with some usage will be packed with VM's cell
-until it will be completely exhausted, before new free host's cell will be
-used. When the packing_host_numa_cells_allocation_strategy variable is set to
-``False``, host's NUMA cell with more resources available will be used.
+default host's NUMA cell with more resources consumed will be chosen last for
+placing attempt. When the packing_host_numa_cells_allocation_strategy variable
+is set to ``False``, host's NUMA cell with more resources available will be
+used. When set to ``True`` cells with some usage will be packed with VM's cell
+until it will be completely exhausted, before a new free host's cell will be
+used.
 
 Possible values:
 
