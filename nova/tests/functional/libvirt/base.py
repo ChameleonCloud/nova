@@ -163,8 +163,7 @@ class ServersTestBase(integrated_helpers._IntegratedTestBase):
             # actually start the service.
             orig_con = self.mock_conn.return_value
             self.mock_conn.return_value = fake_connection
-            compute = self.start_service(
-                'compute', host=hostname, cell_name=cell_name)
+            compute = self.start_service('compute', host=hostname)
             # Once that's done, we need to tweak the compute "service" to
             # make sure it returns unique objects.
             compute.driver._host.get_connection = lambda: fake_connection
