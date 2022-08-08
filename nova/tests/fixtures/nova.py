@@ -923,9 +923,18 @@ class OSAPIFixture(fixtures.Fixture):
             base_url += '/' + self.project_id
 
         self.api = client.TestOpenStackClient(
-            'fake', base_url, project_id=self.project_id)
+            'fake', base_url, project_id=self.project_id,
+        )
+        self.alternative_api = client.TestOpenStackClient(
+            'fake', base_url, project_id=self.project_id,
+        )
         self.admin_api = client.TestOpenStackClient(
-            'admin', base_url, project_id=self.project_id)
+            'admin', base_url, project_id=self.project_id,
+        )
+        self.alternative_admin_api = client.TestOpenStackClient(
+            'admin', base_url, project_id=self.project_id,
+        )
+
         # Provide a way to access the wsgi application to tests using
         # the fixture.
         self.app = app
@@ -1013,9 +1022,9 @@ class PoisonFunctions(fixtures.Fixture):
         # Don't poison the function if it's already mocked
         import nova.virt.libvirt.host
         if not isinstance(nova.virt.libvirt.host.Host._init_events, mock.Mock):
-            self.useFixture(fixtures.MockPatch(
+            self.useFixture(fixtures.MonkeyPatch(
                 'nova.virt.libvirt.host.Host._init_events',
-                side_effect=evloop))
+                evloop))
 
 
 class IndirectionAPIFixture(fixtures.Fixture):
