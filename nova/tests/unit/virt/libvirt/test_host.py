@@ -1154,12 +1154,9 @@ Active:          8381604 kB
         expect_vf = ["rx", "tx", "sg", "tso", "gso", "gro", "rxvlan", "txvlan"]
         self.assertEqual(expect_vf, actualvf)
 
-    @mock.patch.object(pci_utils, 'get_mac_by_pci_address',
-                       new=mock.MagicMock(
-                           side_effect=exception.PciDeviceNotFoundById(
-                               '0000:04:00.3')))
-    @mock.patch.object(pci_utils, 'get_ifname_by_pci_address')
-    def test_get_pcidev_info_non_nic(self, mock_get_ifname):
+    def test_get_pcidev_info_non_nic(self):
+        pci_utils.get_mac_by_pci_address.side_effect = (
+            exception.PciDeviceNotFoundById('0000:04:00.3'))
         dev_name = "pci_0000_04_11_7"
         pci_dev = fakelibvirt.NodeDevice(
             self.host._get_connection(),
