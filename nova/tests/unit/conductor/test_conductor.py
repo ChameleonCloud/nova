@@ -16,6 +16,7 @@
 """Tests for the conductor service."""
 
 import copy
+import ddt
 from unittest import mock
 
 import ddt
