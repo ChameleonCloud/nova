@@ -53,7 +53,7 @@ class PostLiveMigrationFail(
             "Failed to remove source vol connection post live migration")
         mock_migration.side_effect = error
 
-        server = self._live_migrate(
+        self._live_migrate(
             server, migration_expected_state='error',
             server_expected_state='ERROR')
         # FIXME(amit): this should point to the dest as after migration
