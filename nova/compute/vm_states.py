@@ -75,6 +75,9 @@ ALLOW_HARD_REBOOT = ALLOW_SOFT_REBOOT + [STOPPED, PAUSED, SUSPENDED, ERROR]
 # states we allow to trigger crash dump
 ALLOW_TRIGGER_CRASH_DUMP = [ACTIVE, PAUSED, RESCUED, RESIZED, ERROR]
 
+# states we allow for evacuate instance
+ALLOW_TARGET_STATES = [STOPPED]
+
 
 def allow_resource_removal(vm_state, task_state=None):
     """(vm_state, task_state) combinations we allow resources to be freed in"""
