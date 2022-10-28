@@ -2475,10 +2475,12 @@ class ComputeManager(manager.Manager):
 
         if provider_mapping:
             try:
-                compute_utils\
-                    .update_pci_request_with_placement_allocations(
-                        context, self.reportclient,
-                        instance.pci_requests.requests, provider_mapping)
+                compute_utils.update_pci_request_with_placement_allocations(
+                    context,
+                    self.reportclient,
+                    instance.pci_requests.requests,
+                    provider_mapping,
+                )
             except (exception.AmbiguousResourceProviderForPCIRequest,
                     exception.UnexpectedResourceProviderNameForPCIRequest
                     ) as e:
@@ -3807,10 +3809,12 @@ class ComputeManager(manager.Manager):
             provider_mapping = self._get_request_group_mapping(request_spec)
 
             if provider_mapping:
-                compute_utils.\
-                    update_pci_request_with_placement_allocations(
-                        context, self.reportclient,
-                        instance.pci_requests.requests, provider_mapping)
+                compute_utils.update_pci_request_with_placement_allocations(
+                    context,
+                    self.reportclient,
+                    instance.pci_requests.requests,
+                    provider_mapping,
+                )
 
         claim_context = rebuild_claim(
             context, instance, scheduled_node, allocations,
@@ -5433,10 +5437,12 @@ class ComputeManager(manager.Manager):
 
         if provider_mapping:
             try:
-                compute_utils.\
-                    update_pci_request_with_placement_allocations(
-                        context, self.reportclient,
-                        instance.pci_requests.requests, provider_mapping)
+                compute_utils.update_pci_request_with_placement_allocations(
+                    context,
+                    self.reportclient,
+                    instance.pci_requests.requests,
+                    provider_mapping,
+                )
             except (exception.AmbiguousResourceProviderForPCIRequest,
                     exception.UnexpectedResourceProviderNameForPCIRequest
                     ) as e:
@@ -6917,12 +6923,12 @@ class ComputeManager(manager.Manager):
 
         try:
             if provider_mappings:
-                update = (
-                    compute_utils.
-                    update_pci_request_with_placement_allocations)
-                update(
-                    context, self.reportclient, instance.pci_requests.requests,
-                    provider_mappings)
+                compute_utils.update_pci_request_with_placement_allocations(
+                    context,
+                    self.reportclient,
+                    instance.pci_requests.requests,
+                    provider_mappings,
+                )
 
             accel_info = []
             if accel_uuids:
@@ -7998,12 +8004,12 @@ class ComputeManager(manager.Manager):
                 instance_uuid=instance.uuid) from e
 
         try:
-            update = (
-                compute_utils.
-                update_pci_request_with_placement_allocations)
-            update(
-                context, self.reportclient, pci_reqs.requests,
-                provider_mappings)
+            compute_utils.update_pci_request_with_placement_allocations(
+                context,
+                self.reportclient,
+                pci_reqs.requests,
+                provider_mappings,
+            )
         except (
             exception.AmbiguousResourceProviderForPCIRequest,
             exception.UnexpectedResourceProviderNameForPCIRequest
