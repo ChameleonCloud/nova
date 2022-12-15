@@ -617,7 +617,31 @@ class NovaProxyRequestHandlerTestCase(test.NoDBTestCase):
         result = output.readlines()
 
         # Verify no redirect happens and instead a 400 Bad Request is returned.
-        self.assertIn('400 URI must not start with //', result[0].decode())
+        # NOTE: As of python 3.10.6 there is a fix for this vulnerability,
+        # which will cause a 301 Moved Permanently error to be returned
+        # instead that redirects to a sanitized version of the URL with extra
+        # leading '/' characters removed.
+        # See https://github.com/python/cpython/issues/87389 for details.
+        # We will consider either response to be valid for this test. This will
+        # also help if and when the above fix gets backported to older versions
+        # of python.
+        errmsg = result[0].decode()
+        expected_nova = '400 URI must not start with //'
+        expected_cpython = '301 Moved Permanently'
+
+        self.assertTrue(expected_nova in errmsg or expected_cpython in errmsg)
+
+        # If we detect the cpython fix, verify that the redirect location is
+        # now the same url but with extra leading '/' characters removed.
+        if expected_cpython in errmsg:
+            location = result[3].decode()
+            if location.startswith('Location: '):
+                location = location[len('Location: '):]
+            location = location.rstrip('\r\n')
+            self.assertTrue(
+                location.startswith('/example.com/%2F..'),
+                msg='Redirect location is not the expected sanitized URL',
+            )
 
     def test_reject_open_redirect_3_slashes(self):
         # This will test the behavior when an attempt is made to cause an open
