@@ -1228,8 +1228,6 @@ class _IntegratedTestBase(test.TestCase, PlacementInstanceHelperMixin):
         self.glance = self.useFixture(nova_fixtures.GlanceFixture(self))
         self.policy = self.useFixture(nova_fixtures.RealPolicyFixture())
 
-        self.useFixture(nova_fixtures.ComputeNodeIdFixture())
-
         self.notifier = self.useFixture(
             nova_fixtures.NotificationFixture(self))
 
@@ -1300,8 +1298,6 @@ class ProviderUsageBaseTestCase(test.TestCase, PlacementInstanceHelperMixin):
         self.glance = self.useFixture(nova_fixtures.GlanceFixture(self))
         self.placement = self.useFixture(func_fixtures.PlacementFixture()).api
         self.useFixture(nova_fixtures.AllServicesCurrent())
-
-        self.useFixture(nova_fixtures.ComputeNodeIdFixture())
 
         self.notifier = self.useFixture(
             nova_fixtures.NotificationFixture(self))
