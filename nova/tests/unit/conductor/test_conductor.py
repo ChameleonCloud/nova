@@ -21,7 +21,7 @@ from unittest import mock
 
 import ddt
 from keystoneauth1 import exceptions as ks_exc
-import mock
+from unittest import mock
 from oslo_db import exception as db_exc
 from oslo_limit import exception as limit_exceptions
 import oslo_messaging as messaging
