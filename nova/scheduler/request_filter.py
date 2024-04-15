@@ -30,7 +30,6 @@ CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
 TENANT_METADATA_KEY = 'filter_tenant_id'
 
-
 def trace_request_filter(fn):
     @functools.wraps(fn)
     def wrapper(ctxt, request_spec):
@@ -127,6 +126,68 @@ def require_tenant_aggregate(ctxt, request_spec):
                   ','.join(aggregate_uuids_for_tenant),
                   request_spec.project_id)
     elif agg_required:
+        LOG.warning('Tenant %(tenant)s has no available aggregates',
+                    {'tenant': request_spec.project_id})
+        raise exception.RequestFilterFailed(
+            reason=_('No hosts available for tenant'))
+
+    return True
+
+@trace_request_filter
+def blazar_reservation_filter(ctxt, request_spec):
+    """Require hosts to be in an aggregate corresponding to a blazar reservation.
+    The reservation_id must be passed in as a scheduler hint, with key `reservation`
+
+    Additionally, the user must have permission to use the corresponding reservation.
+    For now, this is enforced by checking that the value 'blazar:owner' on the aggregate
+    matches the requesting project_id.
+
+    if reservation_required is set to true, any scheduling requests without a reservation
+    hint will be rejected.
+
+    In terms of behavior, this is just a combination of the map_az_to_placement_aggregate
+    and require_tenant_aggregate filters, with different key names.
+    """
+
+    # skip the filter if not enabled
+    enabled = CONF['blazar:physical:host'].use_blazar_reservation_prefilter
+    if not enabled:
+        return False
+
+    LOG.debug(f"entered blazar prefilter with request_spec {request_spec}")
+
+    # allow setting reservation hint as mandatory
+    reservation_required = CONF['blazar:physical:host'].blazar_reservation_required
+
+    reservation_hints = request_spec.scheduler_hints.get('reservation',None)
+
+    if reservation_required and not reservation_hints:
+        LOG.warning('Request did not specify mandatory reservation hint')
+        raise exception.RequestFilterFailed(
+            reason=_('Request did not specify mandatory reservation hint'))
+
+    # get list of aggregates owned by the requesting project
+    aggregates_for_project_id = objects.AggregateList.get_by_metadata(ctxt,
+                                                                      key='blazar:owner',
+                                                                      value=request_spec.project_id)
+
+    aggregate_uuids_for_reservation = set([])
+    for agg in aggregates_for_project_id:
+        if agg.name in reservation_hints:
+            aggregate_uuids_for_reservation.add(agg.uuid)
+            break
+
+    if aggregate_uuids_for_reservation:
+        if ('requested_destination' not in request_spec or
+                request_spec.requested_destination is None):
+            request_spec.requested_destination = objects.Destination()
+        destination = request_spec.requested_destination
+        destination.require_aggregates(aggregate_uuids_for_reservation)
+        LOG.debug('blazar_reservation_filter request filter added '
+                  'aggregates %s for tenant %r',
+                  ','.join(aggregate_uuids_for_reservation),
+                  request_spec.project_id)
+    elif reservation_required:
         LOG.warning('Tenant %(tenant)s has no available aggregates',
                     {'tenant': request_spec.project_id})
         raise exception.RequestFilterFailed(
@@ -370,6 +431,7 @@ ALL_REQUEST_FILTERS = [
     map_az_to_placement_aggregate,
     require_image_type_support,
     compute_status_filter,
+    blazar_reservation_filter,
     isolate_aggregates,
     transform_image_metadata,
     accelerators_filter,
