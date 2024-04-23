@@ -150,49 +150,64 @@ def blazar_reservation_filter(ctxt, request_spec):
     """
 
     # skip the filter if not enabled
-    enabled = CONF['blazar:physical:host'].use_blazar_reservation_prefilter
+    enabled = CONF.scheduler.use_blazar_reservation_prefilter
     if not enabled:
         return False
 
-    LOG.debug(f"entered blazar prefilter with request_spec {request_spec}")
-
     # allow setting reservation hint as mandatory
-    reservation_required = CONF['blazar:physical:host'].blazar_reservation_required
+    reservation_required = CONF.scheduler.blazar_reservation_required
+    reservation_hints = request_spec.scheduler_hints.get('reservation', None)
 
-    reservation_hints = request_spec.scheduler_hints.get('reservation',None)
+    # handle missing reservation hint
+    if not reservation_hints:
+        no_reservation_hint_msg = f"Can't schedule instance {request_spec.instance_uuid}. No reservation hint was specified."
+        if reservation_required:
+            LOG.warning(no_reservation_hint_msg)
+            raise exception.RequestFilterFailed(reason=_(no_reservation_hint_msg))
+        else:
+            LOG.info(no_reservation_hint_msg)
+            # if no reservation hint, we'll skip the rest of this prefilter
+            return False
 
-    if reservation_required and not reservation_hints:
-        LOG.warning('Request did not specify mandatory reservation hint')
-        raise exception.RequestFilterFailed(
-            reason=_('Request did not specify mandatory reservation hint'))
+    # after this point, assume we have a reservation hint. we don't check for
+    # "reservation required" any longer. At this point, you requested a reservation,
+    # and none matched, so 0 is the expected result. If you didn't want one,
+    # you shouldn't have asked for one!
 
-    # get list of aggregates owned by the requesting project
+
+    # handle possibility of multiple reservation hints, or malformed requests by
+    # not asking DB directly for the name, instead get list that project "could" use.
     aggregates_for_project_id = objects.AggregateList.get_by_metadata(ctxt,
                                                                       key='blazar:owner',
                                                                       value=request_spec.project_id)
 
+    if not aggregates_for_project_id:
+        no_project_aggregates_msg=f"Can't schedule instance {request_spec.instance_uuid}. Tenant {request_spec.project_id} has no available aggregates"
+        LOG.warning(no_project_aggregates_msg)
+        raise exception.RequestFilterFailed(reason=_(no_project_aggregates_msg))
+
+    # of the aggregates owned by the project, check for ones with the right name
     aggregate_uuids_for_reservation = set([])
     for agg in aggregates_for_project_id:
         if agg.name in reservation_hints:
             aggregate_uuids_for_reservation.add(agg.uuid)
             break
 
+    # handle common case, we've found an aggregate to use, ask placement to filter by it
     if aggregate_uuids_for_reservation:
-        if ('requested_destination' not in request_spec or
-                request_spec.requested_destination is None):
+        if ('requested_destination' not in request_spec or request_spec.requested_destination is None):
             request_spec.requested_destination = objects.Destination()
         destination = request_spec.requested_destination
         destination.require_aggregates(aggregate_uuids_for_reservation)
-        LOG.debug('blazar_reservation_filter request filter added '
-                  'aggregates %s for tenant %r',
-                  ','.join(aggregate_uuids_for_reservation),
-                  request_spec.project_id)
-    elif reservation_required:
-        LOG.warning('Tenant %(tenant)s has no available aggregates',
-                    {'tenant': request_spec.project_id})
-        raise exception.RequestFilterFailed(
-            reason=_('No hosts available for tenant'))
+        LOG.debug('blazar_reservation_filter request filter added aggregates %s for tenant %r',
+                  ','.join(aggregate_uuids_for_reservation), request_spec.project_id)
+    else:
+        # no aggregates match
+        no_aggregates_for_reservation_hint_msg=f"Can't schedule instance {request_spec.instance_uuid}. No aggregates were found matching hints {reservation_hints}"
+        LOG.warning(no_aggregates_for_reservation_hint_msg)
+        raise exception.RequestFilterFailed(reason=_(no_aggregates_for_reservation_hint_msg))
 
+    # at this point, we've either raised an exception or successfully updated the destination aggregate
     return True
 
 

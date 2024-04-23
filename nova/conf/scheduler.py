@@ -147,6 +147,14 @@ Related options:
 
 - ``[scheduler] placement_aggregate_required_for_tenants``
 """),
+    cfg.BoolOpt("use_blazar_reservation_prefilter",
+        default=False,
+        help="Whether to apply blazar reservation filter during nova prefilter stage"
+    ),
+    cfg.BoolOpt("blazar_reservation_required",
+        default=False,
+        help="If true, a reservation hunt must be present on all requests"
+    ),
     cfg.BoolOpt("query_placement_for_availability_zone",
         default=True,
         deprecated_for_removal=True,
