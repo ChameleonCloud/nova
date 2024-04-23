@@ -379,15 +379,25 @@ class HostManager(object):
             self._update_aggregate(aggregates)
 
     def _update_aggregate(self, aggregate):
-        self.aggs_by_id[aggregate.id] = aggregate
-        for host in aggregate.hosts:
-            self.host_aggregates_map[host].add(aggregate.id)
-        # Refreshing the mapping dict to remove all hosts that are no longer
-        # part of the aggregate
-        for host in self.host_aggregates_map:
-            if (aggregate.id in self.host_aggregates_map[host] and
-                    host not in aggregate.hosts):
-                self.host_aggregates_map[host].remove(aggregate.id)
+        # add a lock to ensure nova scheduler has a consistent view of hosts per aggregate if they are
+        # added or removed in parallel. Lock per aggregate to reduce contention
+        # if multiple aggregates are modified at the same time.
+        _lock_name=f"nova-agg-{aggregate.name}"
+        @utils.synchronized(_lock_name)
+        def _locked_update_aggregate(aggregate):
+            self.aggs_by_id[aggregate.id] = aggregate
+            LOG.debug(f"host_manager cache for aggregate: {aggregate.name} has {aggregate.hosts}")
+
+            for host in aggregate.hosts:
+                self.host_aggregates_map[host].add(aggregate.id)
+            # Refreshing the mapping dict to remove all hosts that are no longer
+            # part of the aggregate
+            for host in self.host_aggregates_map:
+                if (aggregate.id in self.host_aggregates_map[host] and
+                        host not in aggregate.hosts):
+                    self.host_aggregates_map[host].remove(aggregate.id)
+
+        return _locked_update_aggregate(aggregate)
 
     def delete_aggregate(self, aggregate):
         """Deletes internal HostManager information about a specific aggregate.
