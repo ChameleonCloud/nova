@@ -5714,13 +5714,15 @@ class ComputeTestCase(BaseTestCase,
             objects=[objects.PciDevice(vendor_id='1377',
                                        product_id='0047',
                                        address='0000:0a:00.1',
-                                       request_id=uuids.req1)])
+                                       request_id=uuids.req1,
+                                       compute_node_id=1)])
 
         new_pci_devices = objects.PciDeviceList(
             objects=[objects.PciDevice(vendor_id='1377',
                                        product_id='0047',
                                        address='0000:0b:00.1',
-                                       request_id=uuids.req2)])
+                                       request_id=uuids.req2,
+                                       compute_node_id=2)])
 
         if expected_pci_addr == old_pci_devices[0].address:
             expected_pci_device = old_pci_devices[0]
@@ -8619,16 +8621,13 @@ class ComputeAPITestCase(BaseTestCase):
 
     def test_create_instance_sets_system_metadata(self):
         # Make sure image properties are copied into system metadata.
-        with mock.patch.object(
-            self.compute_api.compute_task_api, 'schedule_and_build_instances',
-        ) as mock_sbi:
-            ref, resv_id = self.compute_api.create(
-                self.context,
-                flavor=self.default_flavor,
-                image_href='f5000000-0000-0000-0000-000000000000')
+        ref, resv_id = self.compute_api.create(
+            self.context,
+            flavor=self.default_flavor,
+            image_href='f5000000-0000-0000-0000-000000000000')
 
-            build_call = mock_sbi.call_args_list[0]
-            instance = build_call[1]['build_requests'][0].instance
+        build_call = self.schedule_and_build_instances_mock.call_args_list[0]
+        instance = build_call[1]['build_requests'][0].instance
 
         image_props = {'image_kernel_id': uuids.kernel_id,
                  'image_ramdisk_id': uuids.ramdisk_id,
@@ -8638,16 +8637,14 @@ class ComputeAPITestCase(BaseTestCase):
             self.assertEqual(value, instance.system_metadata[key])
 
     def test_create_saves_flavor(self):
-        with mock.patch.object(
-            self.compute_api.compute_task_api, 'schedule_and_build_instances',
-        ) as mock_sbi:
-            ref, resv_id = self.compute_api.create(
-                self.context,
-                flavor=self.default_flavor,
-                image_href=uuids.image_href_id)
+        ref, resv_id = self.compute_api.create(
+            self.context,
+            flavor=self.default_flavor,
+            image_href=uuids.image_href_id)
 
-            build_call = mock_sbi.call_args_list[0]
-            instance = build_call[1]['build_requests'][0].instance
+        build_call = self.schedule_and_build_instances_mock.call_args_list[0]
+        instance = build_call[1]['build_requests'][0].instance
+
         self.assertIn('flavor', instance)
         self.assertEqual(self.default_flavor.flavorid,
                          instance.flavor.flavorid)
@@ -8655,19 +8652,18 @@ class ComputeAPITestCase(BaseTestCase):
 
     def test_create_instance_associates_security_groups(self):
         # Make sure create associates security groups.
-        with test.nested(
-                mock.patch.object(self.compute_api.compute_task_api,
-                                  'schedule_and_build_instances'),
-                mock.patch('nova.network.security_group_api.validate_name',
-                           return_value=uuids.secgroup_id),
-        ) as (mock_sbi, mock_secgroups):
+        with mock.patch(
+            "nova.network.security_group_api.validate_name",
+            return_value=uuids.secgroup_id,
+        ) as mock_secgroups:
             self.compute_api.create(
                 self.context,
                 flavor=self.default_flavor,
                 image_href=uuids.image_href_id,
                 security_groups=['testgroup'])
 
-            build_call = mock_sbi.call_args_list[0]
+            build_call = (
+                self.schedule_and_build_instances_mock.call_args_list[0])
             reqspec = build_call[1]['request_spec'][0]
 
         self.assertEqual(1, len(reqspec.security_groups))
@@ -8698,22 +8694,19 @@ class ComputeAPITestCase(BaseTestCase):
         requested_networks = objects.NetworkRequestList(
             objects=[objects.NetworkRequest(port_id=uuids.port_instance)])
 
-        with test.nested(
-            mock.patch.object(
-                self.compute_api.compute_task_api,
-                'schedule_and_build_instances'),
-            mock.patch.object(
-                self.compute_api.network_api,
-                'create_resource_requests',
-                return_value=(None, [], objects.RequestLevelParams())),
-        ) as (mock_sbi, _mock_create_resreqs):
+        with mock.patch.object(
+            self.compute_api.network_api,
+            "create_resource_requests",
+            return_value=(None, [], objects.RequestLevelParams()),
+        ):
             self.compute_api.create(
                 self.context,
                 flavor=self.default_flavor,
                 image_href=uuids.image_href_id,
                 requested_networks=requested_networks)
 
-            build_call = mock_sbi.call_args_list[0]
+            build_call = (
+                self.schedule_and_build_instances_mock.call_args_list[0])
             reqspec = build_call[1]['request_spec'][0]
 
         self.assertEqual(1, len(reqspec.requested_networks))
@@ -10209,8 +10202,7 @@ class ComputeAPITestCase(BaseTestCase):
                           self.compute_api.get_console_output,
                           self.context, instance)
 
-    @mock.patch.object(compute_utils, 'notify_about_instance_action')
-    def test_attach_interface(self, mock_notify):
+    def test_attach_interface(self):
         instance = self._create_fake_instance_obj()
         nwinfo = [fake_network_cache_model.new_vif()]
         network_id = nwinfo[0]['network']['id']
@@ -10228,8 +10220,12 @@ class ComputeAPITestCase(BaseTestCase):
             mock.patch.object(
                 self.compute,
                 "_claim_pci_device_for_interface_attach",
-                return_value=None)
-        ) as (cap, mock_lock, mock_create_resource_req, mock_claim_pci):
+                return_value=None),
+            mock.patch.object(compute_utils, 'notify_about_instance_action'),
+        ) as (
+            cap, mock_lock, mock_create_resource_req, mock_claim_pci,
+            mock_notify
+        ):
             mock_create_resource_req.return_value = (
                 None, [], mock.sentinel.req_lvl_params)
             vif = self.compute.attach_interface(self.context,
@@ -11049,8 +11045,7 @@ class ComputeAPITestCase(BaseTestCase):
             mock_remove_res.assert_called_once_with(
                 self.context, instance.uuid, mock.sentinel.resources)
 
-    @mock.patch.object(compute_utils, 'notify_about_instance_action')
-    def test_detach_interface(self, mock_notify):
+    def test_detach_interface(self):
         nwinfo, port_id = self.test_attach_interface()
         instance = self._create_fake_instance_obj()
         instance.info_cache = objects.InstanceInfoCache.new(
@@ -11081,10 +11076,13 @@ class ComputeAPITestCase(BaseTestCase):
             mock.patch('nova.pci.request.get_instance_pci_request_from_vif',
                        return_value=pci_req),
             mock.patch.object(self.compute.rt, 'unclaim_pci_devices'),
-            mock.patch.object(instance, 'save')
+            mock.patch.object(instance, 'save'),
+            mock.patch.object(compute_utils, 'notify_about_instance_action'),
         ) as (
-                mock_remove_alloc, mock_deallocate, mock_lock,
-                mock_get_pci_req, mock_unclaim_pci, mock_instance_save):
+            mock_remove_alloc, mock_deallocate, mock_lock,
+            mock_get_pci_req, mock_unclaim_pci, mock_instance_save,
+            mock_notify
+        ):
             self.compute.detach_interface(self.context, instance, port_id)
 
             mock_deallocate.assert_called_once_with(
@@ -11893,17 +11891,16 @@ class ComputeAPITestCase(BaseTestCase):
             instance.save()
 
         @mock.patch.object(objects.Service, 'get_by_compute_host')
-        @mock.patch.object(self.compute_api.compute_task_api,
-                           'rebuild_instance')
         @mock.patch.object(objects.ComputeNodeList, 'get_all_by_host')
         @mock.patch.object(objects.RequestSpec,
                            'get_by_instance_uuid')
         @mock.patch.object(self.compute_api.servicegroup_api, 'service_is_up')
-        def do_test(service_is_up, get_by_instance_uuid, get_all_by_host,
-                    rebuild_instance, get_service):
+        def do_test(
+            service_is_up, get_by_instance_uuid, get_all_by_host, get_service
+        ):
             service_is_up.return_value = False
             get_by_instance_uuid.return_value = fake_spec
-            rebuild_instance.side_effect = fake_rebuild_instance
+            self.rebuild_instance_mock.side_effect = fake_rebuild_instance
             get_all_by_host.return_value = objects.ComputeNodeList(
                 objects=[objects.ComputeNode(
                     host='fake_dest_host',
@@ -11921,7 +11918,7 @@ class ComputeAPITestCase(BaseTestCase):
                 host = None
             else:
                 host = 'fake_dest_host'
-            rebuild_instance.assert_called_once_with(
+            self.rebuild_instance_mock.assert_called_once_with(
                 ctxt,
                 instance=instance,
                 new_pass=None,
@@ -13039,16 +13036,13 @@ class ComputeAPIAggrTestCase(BaseTestCase):
         hosts = aggregate.hosts if 'hosts' in aggregate else None
         self.assertIn(values[0][1][0], hosts)
 
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient')
+    @mock.patch('nova.scheduler.client.report.report_client_singleton')
     def test_placement_client_init(self, mock_report_client):
         """Tests to make sure that the construction of the placement client
-        only happens once per AggregateAPI class instance.
+        uses the singleton helper, and happens only when needed.
         """
-        self.assertIsNone(self.api._placement_client)
-        # Access the property twice to make sure SchedulerReportClient is
-        # only loaded once.
-        for x in range(2):
-            self.api.placement_client
+        self.assertFalse(mock_report_client.called)
+        self.api.placement_client
         mock_report_client.assert_called_once_with()
 
 

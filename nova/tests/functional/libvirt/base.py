@@ -42,7 +42,8 @@ class ServersTestBase(integrated_helpers._IntegratedTestBase):
         super(ServersTestBase, self).setUp()
 
         self.useFixture(nova_fixtures.LibvirtImageBackendFixture())
-        self.useFixture(nova_fixtures.LibvirtFixture())
+        self.useFixture(nova_fixtures.CGroupsFixture())
+        self.libvirt = self.useFixture(nova_fixtures.LibvirtFixture())
         self.useFixture(nova_fixtures.OSBrickFixture())
 
         self.useFixture(fixtures.MockPatch(
@@ -51,12 +52,12 @@ class ServersTestBase(integrated_helpers._IntegratedTestBase):
         self.useFixture(fixtures.MockPatch(
             'nova.virt.libvirt.LibvirtDriver._get_local_gb_info',
             return_value={'total': 128, 'used': 44, 'free': 84}))
-        self.useFixture(fixtures.MockPatch(
+        self.mock_is_valid_hostname = self.useFixture(fixtures.MockPatch(
             'nova.virt.libvirt.driver.libvirt_utils.is_valid_hostname',
-            return_value=True))
-        self.useFixture(fixtures.MockPatch(
+            return_value=True)).mock
+        self.mock_file_open = self.useFixture(fixtures.MockPatch(
             'nova.virt.libvirt.driver.libvirt_utils.file_open',
-            side_effect=lambda *a, **k: io.BytesIO(b'')))
+            side_effect=lambda *a, **k: io.BytesIO(b''))).mock
         self.useFixture(fixtures.MockPatch(
             'nova.privsep.utils.supports_direct_io',
             return_value=True))
@@ -114,7 +115,7 @@ class ServersTestBase(integrated_helpers._IntegratedTestBase):
     def start_compute(
         self, hostname='compute1', host_info=None, pci_info=None,
         mdev_info=None, vdpa_info=None, libvirt_version=None,
-        qemu_version=None,
+        qemu_version=None, cell_name=None, connection=None
     ):
         """Start a compute service.
 
@@ -124,27 +125,53 @@ class ServersTestBase(integrated_helpers._IntegratedTestBase):
         :param host_info: A fakelibvirt.HostInfo object for the host. Defaults
             to a HostInfo with 2 NUMA nodes, 2 cores per node, 2 threads per
             core, and 16GB of RAM.
+        :param connection: A fake libvirt connection. You should not provide it
+            directly. However it is used by restart_compute_service to
+            implement restart without loosing the hypervisor state.
         :returns: The hostname of the created service, which can be used to
             lookup the created service and UUID of the assocaited resource
             provider.
         """
+        if connection and (
+            host_info or
+            pci_info or
+            mdev_info or
+            vdpa_info or
+            libvirt_version or
+            qemu_version
+        ):
+            raise ValueError(
+                "Either an existing connection instance can be provided or a "
+                "list of parameters for a new connection"
+            )
 
         def _start_compute(hostname, host_info):
-            fake_connection = self._get_connection(
-                host_info, pci_info, mdev_info, vdpa_info, libvirt_version,
-                qemu_version, hostname,
-            )
+            if connection:
+                fake_connection = connection
+            else:
+                fake_connection = self._get_connection(
+                    host_info, pci_info, mdev_info, vdpa_info, libvirt_version,
+                    qemu_version, hostname,
+                )
+
+            # If the compute is configured with PCI devices then we need to
+            # make sure that the stubs around sysfs has the MAC address
+            # information for the PCI PF devices
+            if pci_info:
+                self.libvirt.update_sriov_mac_address_mapping(
+                    pci_info.get_pci_address_mac_mapping())
             # This is fun. Firstly we need to do a global'ish mock so we can
             # actually start the service.
-            with mock.patch('nova.virt.libvirt.host.Host.get_connection',
-                            return_value=fake_connection):
-                compute = self.start_service('compute', host=hostname)
-                # Once that's done, we need to tweak the compute "service" to
-                # make sure it returns unique objects. We do this inside the
-                # mock context to avoid a small window between the end of the
-                # context and the tweaking where get_connection would revert to
-                # being an autospec mock.
-                compute.driver._host.get_connection = lambda: fake_connection
+            orig_con = self.mock_conn.return_value
+            self.mock_conn.return_value = fake_connection
+            compute = self.start_service(
+                'compute', host=hostname, cell_name=cell_name)
+            # Once that's done, we need to tweak the compute "service" to
+            # make sure it returns unique objects.
+            compute.driver._host.get_connection = lambda: fake_connection
+            # Then we revert the local mock tweaking so the next compute can
+            # get its own
+            self.mock_conn.return_value = orig_con
             return compute
 
         # ensure we haven't already registered services with these hostnames
@@ -158,6 +185,74 @@ class ServersTestBase(integrated_helpers._IntegratedTestBase):
             'resource_providers'][0]['uuid']
 
         return hostname
+
+    def restart_compute_service(
+        self,
+        hostname,
+        host_info=None,
+        pci_info=None,
+        mdev_info=None,
+        vdpa_info=None,
+        libvirt_version=None,
+        qemu_version=None,
+        keep_hypervisor_state=True,
+    ):
+        """Stops the service and starts a new one to have realistic restart
+
+        :param hostname: the hostname of the nova-compute service to be
+            restarted
+        :param keep_hypervisor_state: If True then we reuse the fake connection
+            from the existing driver. If False a new connection will be created
+            based on the other parameters provided
+        """
+        # We are intentionally not calling super() here. Nova's base test class
+        # defines starting and restarting compute service with a very
+        # different signatures and also those calls are cannot be made aware of
+        # the intricacies of the libvirt fixture. So we simply hide that
+        # implementation.
+
+        if keep_hypervisor_state and (
+            host_info or
+            pci_info or
+            mdev_info or
+            vdpa_info or
+            libvirt_version or
+            qemu_version
+        ):
+            raise ValueError(
+                "Either keep_hypervisor_state=True or a list of libvirt "
+                "parameters can be provided but not both"
+            )
+
+        compute = self.computes.pop(hostname)
+        self.compute_rp_uuids.pop(hostname)
+
+        # NOTE(gibi): The service interface cannot be used to simulate a real
+        # service restart as the manager object will not be recreated after a
+        # service.stop() and service.start() therefore the manager state will
+        # survive. For example the resource tracker will not be recreated after
+        # a stop start. The service.kill() call cannot help as it deletes
+        # the service from the DB which is unrealistic and causes that some
+        # operation that refers to the killed host (e.g. evacuate) fails.
+        # So this helper method will stop the original service and then starts
+        # a brand new compute service for the same host and node. This way
+        # a new ComputeManager instance will be created and initialized during
+        # the service startup.
+        compute.stop()
+
+        # this service was running previously, so we have to make sure that
+        # we restart it in the same cell
+        cell_name = self.host_mappings[compute.host].cell_mapping.name
+
+        old_connection = compute.manager.driver._get_connection()
+
+        self.start_compute(
+            hostname, host_info, pci_info, mdev_info, vdpa_info,
+            libvirt_version, qemu_version, cell_name,
+            old_connection if keep_hypervisor_state else None
+        )
+
+        return self.computes[hostname]
 
 
 class LibvirtMigrationMixin(object):
@@ -359,6 +454,22 @@ class LibvirtNeutronFixture(nova_fixtures.NeutronFixture):
         'binding:vif_details': {'vlan': 42},
         'binding:vif_type': 'hw_veb',
         'binding:vnic_type': 'direct',
+    }
+
+    network_4_port_pf = {
+        'id': 'c6f51315-9202-416f-9e2f-eb78b3ac36d9',
+        'network_id': network_4['id'],
+        'status': 'ACTIVE',
+        'mac_address': 'b5:bc:2e:e7:51:01',
+        'fixed_ips': [
+            {
+                'ip_address': '192.168.4.8',
+                'subnet_id': subnet_4['id']
+            }
+        ],
+        'binding:vif_details': {'vlan': 42},
+        'binding:vif_type': 'hostdev_physical',
+        'binding:vnic_type': 'direct-physical',
     }
 
     def __init__(self, test):

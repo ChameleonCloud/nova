@@ -426,9 +426,7 @@ allocation_ratio_opts = [
 Virtual CPU to physical CPU allocation ratio.
 
 This option is used to influence the hosts selected by the Placement API by
-configuring the allocation ratio for ``VCPU`` inventory. In addition, the
-``AggregateCoreFilter`` (deprecated) will fall back to this configuration value
-if no per-aggregate setting is found.
+configuring the allocation ratio for ``VCPU`` inventory.
 
 .. note::
 
@@ -459,9 +457,7 @@ Related options:
 Virtual RAM to physical RAM allocation ratio.
 
 This option is used to influence the hosts selected by the Placement API by
-configuring the allocation ratio for ``MEMORY_MB`` inventory. In addition, the
-``AggregateRamFilter`` (deprecated) will fall back to this configuration value
-if no per-aggregate setting is found.
+configuring the allocation ratio for ``MEMORY_MB`` inventory.
 
 .. note::
 
@@ -487,9 +483,7 @@ Related options:
 Virtual disk to physical disk allocation ratio.
 
 This option is used to influence the hosts selected by the Placement API by
-configuring the allocation ratio for ``DISK_GB`` inventory. In addition, the
-``AggregateDiskFilter`` (deprecated) will fall back to this configuration value
-if no per-aggregate setting is found.
+configuring the allocation ratio for ``DISK_GB`` inventory.
 
 When configured, a ratio greater than 1.0 will result in over-subscription of
 the available physical disk, which can be useful for more efficiently packing
@@ -1007,6 +1001,15 @@ Related options:
 * ``[scheduler]query_placement_for_image_type_support`` - enables
   filtering computes based on supported image types, which is required
   to be enabled for this to take effect.
+"""),
+    cfg.ListOpt('vmdk_allowed_types',
+                default=['streamOptimized', 'monolithicSparse'],
+                help="""
+A list of strings describing allowed VMDK "create-type" subformats
+that will be allowed. This is recommended to only include
+single-file-with-sparse-header variants to avoid potential host file
+exposure due to processing named extents. If this list is empty, then no
+form of VMDK image will be allowed.
 """),
 ]
 

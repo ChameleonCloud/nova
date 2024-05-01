@@ -21,6 +21,7 @@ from contextlib import contextmanager
 import functools
 import logging as std_logging
 import os
+import time
 import warnings
 
 import eventlet
@@ -431,6 +432,13 @@ class CellDatabases(fixtures.Fixture):
         #     yield to do the actual work. We can do schedulable things
         #     here and not exclude other threads from making progress.
         #     If an exception is raised, we capture that and save it.
+        #     Note that it is possible that another thread has changed the
+        #     global state (step #2) after we released the writer lock but
+        #     before we acquired the reader lock. If this happens, we will
+        #     detect the global state change and retry step #2 a limited number
+        #     of times. If we happen to race repeatedly with another thread and
+        #     exceed our retry limit, we will give up and raise a RuntimeError,
+        #     which will fail the test.
         #  4. If we changed state in #2, we need to change it back. So we grab
         #     a writer lock again and do that.
         #  5. Finally, if an exception was raised in #3 while state was
@@ -449,29 +457,47 @@ class CellDatabases(fixtures.Fixture):
 
         raised_exc = None
 
-        with self._cell_lock.write_lock():
-            if cell_mapping is not None:
-                # This assumes the next local DB access is the same cell that
-                # was targeted last time.
-                self._last_ctxt_mgr = desired
+        def set_last_ctxt_mgr():
+            with self._cell_lock.write_lock():
+                if cell_mapping is not None:
+                    # This assumes the next local DB access is the same cell
+                    # that was targeted last time.
+                    self._last_ctxt_mgr = desired
 
-        with self._cell_lock.read_lock():
-            if self._last_ctxt_mgr != desired:
-                # NOTE(danms): This is unlikely to happen, but it's possible
-                # another waiting writer changed the state between us letting
-                # it go and re-acquiring as a reader. If lockutils supported
-                # upgrading and downgrading locks, this wouldn't be a problem.
-                # Regardless, assert that it is still as we left it here
-                # so we don't hit the wrong cell. If this becomes a problem,
-                # we just need to retry the write section above until we land
-                # here with the cell we want.
-                raise RuntimeError('Global DB state changed underneath us')
+        # Set last context manager to the desired cell's context manager.
+        set_last_ctxt_mgr()
 
+        # Retry setting the last context manager if we detect that a writer
+        # changed global DB state before we take the read lock.
+        for retry_time in range(0, 3):
             try:
-                with self._real_target_cell(context, cell_mapping) as ccontext:
-                    yield ccontext
-            except Exception as exc:
-                raised_exc = exc
+                with self._cell_lock.read_lock():
+                    if self._last_ctxt_mgr != desired:
+                        # NOTE(danms): This is unlikely to happen, but it's
+                        # possible another waiting writer changed the state
+                        # between us letting it go and re-acquiring as a
+                        # reader. If lockutils supported upgrading and
+                        # downgrading locks, this wouldn't be a problem.
+                        # Regardless, assert that it is still as we left it
+                        # here so we don't hit the wrong cell. If this becomes
+                        # a problem, we just need to retry the write section
+                        # above until we land here with the cell we want.
+                        raise RuntimeError(
+                            'Global DB state changed underneath us')
+                    try:
+                        with self._real_target_cell(
+                            context, cell_mapping
+                        ) as ccontext:
+                            yield ccontext
+                    except Exception as exc:
+                        raised_exc = exc
+                    # Leave the retry loop after calling target_cell
+                    break
+            except RuntimeError:
+                # Give other threads a chance to make progress, increasing the
+                # wait time between attempts.
+                time.sleep(retry_time)
+                set_last_ctxt_mgr()
 
         with self._cell_lock.write_lock():
             # Once we have returned from the context, we need
@@ -807,6 +833,16 @@ class WarningsFixture(fixtures.Fixture):
 
         self.addCleanup(warnings.resetwarnings)
 
+        # Enable general SQLAlchemy warnings also to ensure we're not doing
+        # silly stuff. It's possible that we'll need to filter things out here
+        # with future SQLAlchemy versions, but that's a good thing
+
+        warnings.filterwarnings(
+            'error',
+            module='nova',
+            category=sqla_exc.SAWarning,
+        )
+
 
 class ConfPatcher(fixtures.Fixture):
     """Fixture to patch and restore global CONF.
@@ -923,9 +959,18 @@ class OSAPIFixture(fixtures.Fixture):
             base_url += '/' + self.project_id
 
         self.api = client.TestOpenStackClient(
-            'fake', base_url, project_id=self.project_id)
+            'fake', base_url, project_id=self.project_id,
+        )
+        self.alternative_api = client.TestOpenStackClient(
+            'fake', base_url, project_id=self.project_id,
+        )
         self.admin_api = client.TestOpenStackClient(
-            'admin', base_url, project_id=self.project_id)
+            'admin', base_url, project_id=self.project_id,
+        )
+        self.alternative_admin_api = client.TestOpenStackClient(
+            'admin', base_url, project_id=self.project_id,
+        )
+
         # Provide a way to access the wsgi application to tests using
         # the fixture.
         self.app = app
@@ -1013,9 +1058,9 @@ class PoisonFunctions(fixtures.Fixture):
         # Don't poison the function if it's already mocked
         import nova.virt.libvirt.host
         if not isinstance(nova.virt.libvirt.host.Host._init_events, mock.Mock):
-            self.useFixture(fixtures.MockPatch(
+            self.useFixture(fixtures.MonkeyPatch(
                 'nova.virt.libvirt.host.Host._init_events',
-                side_effect=evloop))
+                evloop))
 
 
 class IndirectionAPIFixture(fixtures.Fixture):
@@ -1217,6 +1262,77 @@ class PrivsepFixture(fixtures.Fixture):
         super(PrivsepFixture, self).setUp()
         self.useFixture(fixtures.MockPatchObject(
             nova.privsep.sys_admin_pctxt, 'client_mode', False))
+
+
+class CGroupsFixture(fixtures.Fixture):
+    """Mocks checks made for available subsystems on the host's control group.
+
+    The fixture mocks all calls made on the host to verify the capabilities
+    provided by its kernel. Through this, one can simulate the underlying
+    system hosts work on top of and have tests react to expected outcomes from
+    such.
+
+    Use sample:
+    >>> cgroups = self.useFixture(CGroupsFixture())
+    >>> cgroups = self.useFixture(CGroupsFixture(version=2))
+    >>> cgroups = self.useFixture(CGroupsFixture())
+    ... cgroups.version = 2
+
+    :attr version: Arranges mocks to simulate the host interact with nova
+                   following the given version of cgroups.
+                   Available values are:
+                        - 0: All checks related to cgroups will return False.
+                        - 1: Checks related to cgroups v1 will return True.
+                        - 2: Checks related to cgroups v2 will return True.
+                   Defaults to 1.
+    """
+
+    def __init__(self, version=1):
+        self._cpuv1 = None
+        self._cpuv2 = None
+
+        self._version = version
+
+    @property
+    def version(self):
+        return self._version
+
+    @version.setter
+    def version(self, value):
+        self._version = value
+        self._update_mocks()
+
+    def setUp(self):
+        super().setUp()
+        self._cpuv1 = self.useFixture(fixtures.MockPatch(
+            'nova.virt.libvirt.host.Host._has_cgroupsv1_cpu_controller')).mock
+        self._cpuv2 = self.useFixture(fixtures.MockPatch(
+            'nova.virt.libvirt.host.Host._has_cgroupsv2_cpu_controller')).mock
+        self._update_mocks()
+
+    def _update_mocks(self):
+        if not self._cpuv1:
+            return
+
+        if not self._cpuv2:
+            return
+
+        if self.version == 0:
+            self._cpuv1.return_value = False
+            self._cpuv2.return_value = False
+            return
+
+        if self.version == 1:
+            self._cpuv1.return_value = True
+            self._cpuv2.return_value = False
+            return
+
+        if self.version == 2:
+            self._cpuv1.return_value = False
+            self._cpuv2.return_value = True
+            return
+
+        raise ValueError(f"Unknown cgroups version: '{self.version}'.")
 
 
 class NoopQuotaDriverFixture(fixtures.Fixture):

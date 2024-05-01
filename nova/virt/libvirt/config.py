@@ -2687,6 +2687,19 @@ class LibvirtConfigGuestFeatureKvmHidden(LibvirtConfigGuestFeature):
         return root
 
 
+class LibvirtConfigGuestFeatureSMM(LibvirtConfigGuestFeature):
+
+    def __init__(self, **kwargs):
+        super(LibvirtConfigGuestFeatureSMM, self).__init__("smm", **kwargs)
+
+    def format_dom(self):
+        root = super(LibvirtConfigGuestFeatureSMM, self).format_dom()
+
+        root.append(etree.Element("smm", state="on"))
+
+        return root
+
+
 class LibvirtConfigGuestFeaturePMU(LibvirtConfigGuestFeature):
 
     def __init__(self, state, **kwargs):
@@ -3276,6 +3289,7 @@ class LibvirtConfigNodeDeviceMdevInformation(LibvirtConfigObject):
                                         root_name="capability", **kwargs)
         self.type = None
         self.iommu_group = None
+        self.uuid = None
 
     def parse_dom(self, xmldoc):
         super(LibvirtConfigNodeDeviceMdevInformation,
@@ -3285,6 +3299,8 @@ class LibvirtConfigNodeDeviceMdevInformation(LibvirtConfigObject):
                 self.type = c.get('id')
             if c.tag == "iommuGroup":
                 self.iommu_group = int(c.get('number'))
+            if c.tag == "uuid":
+                self.uuid = c.text
 
 
 class LibvirtConfigGuestRng(LibvirtConfigGuestDevice):

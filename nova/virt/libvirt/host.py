@@ -46,6 +46,7 @@ from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import excutils
 from oslo_utils import importutils
+from oslo_utils import strutils
 from oslo_utils import units
 from oslo_utils import versionutils
 
@@ -1229,6 +1230,20 @@ class Host(object):
         cfgdev.parse_str(xmlstr)
         return cfgdev.pci_capability.features
 
+    def _get_pf_details(self, device: dict, pci_address: str) -> dict:
+        if device.get('dev_type') != fields.PciDeviceType.SRIOV_PF:
+            return {}
+
+        try:
+            return {
+                'mac_address': pci_utils.get_mac_by_pci_address(pci_address)
+            }
+        except exception.PciDeviceNotFoundById:
+            LOG.debug(
+                'Cannot get MAC address of the PF %s. It is probably attached '
+                'to a guest already', pci_address)
+            return {}
+
     def _get_pcidev_info(
         self,
         devname: str,
@@ -1340,6 +1355,7 @@ class Host(object):
         device.update(
             _get_device_type(cfgdev, address, dev, net_devs, vdpa_devs))
         device.update(_get_device_capabilities(device, dev, net_devs))
+        device.update(self._get_pf_details(device, address))
         return device
 
     def get_vdpa_nodedev_by_address(
@@ -1401,7 +1417,7 @@ class Host(object):
     def list_mediated_devices(self, flags=0):
         """Lookup mediated devices.
 
-        :returns: a list of virNodeDevice instance
+        :returns: a list of strings with the name of the instance
         """
         return self._list_devices("mdev", flags=flags)
 
@@ -1446,15 +1462,44 @@ class Host(object):
         CONFIG_CGROUP_SCHED may be disabled in some kernel configs to
         improve scheduler latency.
         """
+        return self._has_cgroupsv1_cpu_controller() or \
+               self._has_cgroupsv2_cpu_controller()
+
+    def _has_cgroupsv1_cpu_controller(self):
+        LOG.debug(f"Searching host: '{self.get_hostname()}' "
+                  "for CPU controller through CGroups V1...")
         try:
             with open("/proc/self/mounts", "r") as fd:
                 for line in fd.readlines():
                     # mount options and split options
                     bits = line.split()[3].split(",")
                     if "cpu" in bits:
+                        LOG.debug("CPU controller found on host.")
                         return True
+                LOG.debug("CPU controller missing on host.")
                 return False
-        except IOError:
+        except IOError as ex:
+            LOG.debug(f"Search failed due to: '{ex}'. "
+                      "Maybe the host is not running under CGroups V1. "
+                      "Deemed host to be missing controller by this approach.")
+            return False
+
+    def _has_cgroupsv2_cpu_controller(self):
+        LOG.debug(f"Searching host: '{self.get_hostname()}' "
+                  "for CPU controller through CGroups V2...")
+        try:
+            with open("/sys/fs/cgroup/cgroup.controllers", "r") as fd:
+                for line in fd.readlines():
+                    bits = line.split()
+                    if "cpu" in bits:
+                        LOG.debug("CPU controller found on host.")
+                        return True
+                LOG.debug("CPU controller missing on host.")
+                return False
+        except IOError as ex:
+            LOG.debug(f"Search failed due to: '{ex}'. "
+                      "Maybe the host is not running under CGroups V2. "
+                      "Deemed host to be missing controller by this approach.")
             return False
 
     def get_canonical_machine_type(self, arch, machine) -> str:
@@ -1570,9 +1615,9 @@ class Host(object):
             return False
 
         with open(SEV_KERNEL_PARAM_FILE) as f:
-            contents = f.read()
-            LOG.debug("%s contains [%s]", SEV_KERNEL_PARAM_FILE, contents)
-            return contents == "1\n"
+            content = f.read()
+            LOG.debug("%s contains [%s]", SEV_KERNEL_PARAM_FILE, content)
+            return strutils.bool_from_string(content)
 
     @property
     def supports_amd_sev(self) -> bool:
@@ -1642,11 +1687,11 @@ class Host(object):
         arch: str,
         machine: str,
         has_secure_boot: bool,
-    ) -> ty.Tuple[str, str]:
+    ) -> ty.Tuple[str, str, bool]:
         """Get loader for the specified architecture and machine type.
 
-        :returns: A tuple of the bootloader executable path and the NVRAM
-            template path.
+        :returns: A the bootloader executable path and the NVRAM
+            template path and a bool indicating if we need to enable SMM.
         """
 
         machine = self.get_canonical_machine_type(arch, machine)
@@ -1676,6 +1721,7 @@ class Host(object):
             return (
                 loader['mapping']['executable']['filename'],
                 loader['mapping']['nvram-template']['filename'],
+                'requires-smm' in loader['features'],
             )
 
         raise exception.UEFINotSupported()
