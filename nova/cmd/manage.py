@@ -22,6 +22,7 @@
 """
 
 import collections
+from contextlib import contextmanager
 import functools
 import os
 import re
@@ -144,6 +145,33 @@ def format_dict(dct, dict_property="Property", dict_value='Value',
     return encodeutils.safe_encode(pt.get_string()).decode()
 
 
+@contextmanager
+def locked_instance(cell_mapping, instance, reason):
+    """Context manager to lock and unlock instance,
+    lock state will be restored regardless of the success or failure
+    of target functionality.
+
+    :param cell_mapping: instance-cell-mapping
+    :param instance: instance to be lock and unlock
+    :param reason: reason, why lock is required
+    """
+
+    compute_api = api.API()
+
+    initial_state = 'locked' if instance.locked else 'unlocked'
+    if not instance.locked:
+        with context.target_cell(
+                context.get_admin_context(), cell_mapping) as cctxt:
+            compute_api.lock(cctxt, instance, reason=reason)
+    try:
+        yield
+    finally:
+        if initial_state == 'unlocked':
+            with context.target_cell(
+                    context.get_admin_context(), cell_mapping) as cctxt:
+                compute_api.unlock(cctxt, instance)
+
+
 class DbCommands(object):
     """Class for managing the main database."""
 
@@ -229,10 +257,10 @@ class DbCommands(object):
         print(migration.db_version())
 
     @args('--max_rows', type=int, metavar='<number>', dest='max_rows',
-          help='Maximum number of deleted rows to archive. Defaults to 1000. '
-               'Note that this number does not include the corresponding '
-               'rows, if any, that are removed from the API database for '
-               'deleted instances.')
+          help='Maximum number of deleted rows to archive per table. Defaults '
+               'to 1000. Note that this number is a soft limit and does not '
+               'include the corresponding rows, if any, that are removed '
+               'from the API database for deleted instances.')
     @args('--before', metavar='<date>',
           help=('Archive rows that have been deleted before this date. '
                 'Accepts date strings in the default format output by the '
@@ -404,7 +432,10 @@ class DbCommands(object):
              'cell1.instances': 5}
         :param cctxt: Cell-targeted nova.context.RequestContext if archiving
             across all cells
-        :param max_rows: Maximum number of deleted rows to archive
+        :param max_rows: Maximum number of deleted rows to archive per table.
+            Note that this number is a soft limit and does not include the
+            corresponding rows, if any, that are removed from the API database
+            for deleted instances.
         :param until_complete: Whether to run continuously until all deleted
             rows are archived
         :param verbose: Whether to print how many rows were archived per table
@@ -417,15 +448,26 @@ class DbCommands(object):
         """
         ctxt = context.get_admin_context()
         while True:
-            run, deleted_instance_uuids, total_rows_archived = \
+            # table_to_rows = {table_name: number_of_rows_archived}
+            # deleted_instance_uuids = ['uuid1', 'uuid2', ...]
+            table_to_rows, deleted_instance_uuids, total_rows_archived = \
                 db.archive_deleted_rows(
                     cctxt, max_rows, before=before_date, task_log=task_log)
-            for table_name, rows_archived in run.items():
+
+            for table_name, rows_archived in table_to_rows.items():
                 if cell_name:
                     table_name = cell_name + '.' + table_name
                 table_to_rows_archived.setdefault(table_name, 0)
                 table_to_rows_archived[table_name] += rows_archived
-            if deleted_instance_uuids:
+
+            # deleted_instance_uuids does not necessarily mean that any
+            # instances rows were archived because it is obtained by a query
+            # separate from the archive queries. For example, if a
+            # DBReferenceError was raised while processing the instances table,
+            # we would have skipped the table and had 0 rows archived even
+            # though deleted instances rows were found.
+            instances_archived = table_to_rows.get('instances', 0)
+            if deleted_instance_uuids and instances_archived:
                 table_to_rows_archived.setdefault(
                     'API_DB.instance_mappings', 0)
                 table_to_rows_archived.setdefault(
@@ -448,8 +490,9 @@ class DbCommands(object):
 
             # If we're not archiving until there is nothing more to archive, we
             # have reached max_rows in this cell DB or there was nothing to
-            # archive.
-            if not until_complete or not run:
+            # archive. We check the values() in case we get something like
+            # table_to_rows = {'instances': 0} back somehow.
+            if not until_complete or not any(table_to_rows.values()):
                 break
             if verbose:
                 sys.stdout.write('.')
@@ -2998,10 +3041,8 @@ class VolumeAttachmentCommands(object):
         :param instance_uuid: UUID of instance
         :param volume_id: ID of volume attached to the instance
         :param connector: Connector with which to create the new attachment
+        :return status_code: volume-refresh status_code 0 on success
         """
-        volume_api = cinder.API()
-        compute_rpcapi = rpcapi.ComputeAPI()
-        compute_api = api.API()
 
         ctxt = context.get_admin_context()
         im = objects.InstanceMapping.get_by_instance_uuid(ctxt, instance_uuid)
@@ -3017,111 +3058,104 @@ class VolumeAttachmentCommands(object):
                     state=instance.vm_state,
                     method='refresh connection_info (must be stopped)')
 
-            if instance.locked:
-                raise exception.InstanceInvalidState(
-                    instance_uuid=instance_uuid, attr='locked', state='True',
-                    method='refresh connection_info (must be unlocked)')
+            locking_reason = (
+                f'Refreshing connection_info for BDM {bdm.uuid} '
+                f'associated with instance {instance_uuid} and volume '
+                f'{volume_id}.')
 
-            compute_api.lock(
-                cctxt, instance,
-                reason=(
-                    f'Refreshing connection_info for BDM {bdm.uuid} '
-                    f'associated with instance {instance_uuid} and volume '
-                    f'{volume_id}.'))
+            with locked_instance(im.cell_mapping, instance, locking_reason):
+                return self._do_refresh(
+                    cctxt, instance, volume_id, bdm, connector)
 
-        # NOTE(lyarwood): Yes this is weird but we need to recreate the admin
-        # context here to ensure the lock above uses a unique request-id
-        # versus the following refresh and eventual unlock.
-        ctxt = context.get_admin_context()
-        with context.target_cell(ctxt, im.cell_mapping) as cctxt:
-            instance_action = None
-            new_attachment_id = None
-            try:
-                # Log this as an instance action so operators and users are
-                # aware that this has happened.
-                instance_action = objects.InstanceAction.action_start(
-                    cctxt, instance_uuid,
-                    instance_actions.NOVA_MANAGE_REFRESH_VOLUME_ATTACHMENT)
+    def _do_refresh(self, cctxt, instance,
+            volume_id, bdm, connector):
+        volume_api = cinder.API()
+        compute_rpcapi = rpcapi.ComputeAPI()
 
-                # Create a blank attachment to keep the volume reserved
-                new_attachment_id = volume_api.attachment_create(
-                    cctxt, volume_id, instance_uuid)['id']
+        new_attachment_id = None
+        try:
+            # Log this as an instance action so operators and users are
+            # aware that this has happened.
+            instance_action = objects.InstanceAction.action_start(
+                cctxt, instance.uuid,
+                instance_actions.NOVA_MANAGE_REFRESH_VOLUME_ATTACHMENT)
 
-                # RPC call to the compute to cleanup the connections, which
-                # will in turn unmap the volume from the compute host
-                # TODO(lyarwood): Add delete_attachment as a kwarg to
-                # remove_volume_connection as is available in the private
-                # method within the manager.
+            # Create a blank attachment to keep the volume reserved
+            new_attachment_id = volume_api.attachment_create(
+                cctxt, volume_id, instance.uuid)['id']
+
+            # RPC call to the compute to cleanup the connections, which
+            # will in turn unmap the volume from the compute host
+            # TODO(lyarwood): Add delete_attachment as a kwarg to
+            # remove_volume_connection as is available in the private
+            # method within the manager.
+            if instance.host == connector['host']:
                 compute_rpcapi.remove_volume_connection(
                     cctxt, instance, volume_id, instance.host)
+            else:
+                msg = (
+                    f"The compute host '{connector['host']}' in the "
+                    f"connector does not match the instance host "
+                    f"'{instance.host}'.")
+                raise exception.HostConflict(_(msg))
 
-                # Delete the existing volume attachment if present in the bdm.
-                # This isn't present when the original attachment was made
-                # using the legacy cinderv2 APIs before the cinderv3 attachment
-                # based APIs were present.
-                if bdm.attachment_id:
-                    volume_api.attachment_delete(cctxt, bdm.attachment_id)
+            # Delete the existing volume attachment if present in the bdm.
+            # This isn't present when the original attachment was made
+            # using the legacy cinderv2 APIs before the cinderv3 attachment
+            # based APIs were present.
+            if bdm.attachment_id:
+                volume_api.attachment_delete(cctxt, bdm.attachment_id)
 
-                # Update the attachment with host connector, this regenerates
-                # the connection_info that we can now stash in the bdm.
-                new_connection_info = volume_api.attachment_update(
-                    cctxt, new_attachment_id, connector,
-                    bdm.device_name)['connection_info']
+            # Update the attachment with host connector, this regenerates
+            # the connection_info that we can now stash in the bdm.
+            new_connection_info = volume_api.attachment_update(
+                cctxt, new_attachment_id, connector,
+                bdm.device_name)['connection_info']
 
-                # Before we save it to the BDM ensure the serial is stashed as
-                # is done in various other codepaths when attaching volumes.
-                if 'serial' not in new_connection_info:
-                    new_connection_info['serial'] = bdm.volume_id
+            # Before we save it to the BDM ensure the serial is stashed as
+            # is done in various other codepaths when attaching volumes.
+            if 'serial' not in new_connection_info:
+                new_connection_info['serial'] = bdm.volume_id
 
-                # Save the new attachment id and connection_info to the DB
-                bdm.attachment_id = new_attachment_id
-                bdm.connection_info = jsonutils.dumps(new_connection_info)
+            # Save the new attachment id and connection_info to the DB
+            bdm.attachment_id = new_attachment_id
+            bdm.connection_info = jsonutils.dumps(new_connection_info)
+            bdm.save()
+
+            # Finally mark the attachment as complete, moving the volume
+            # status from attaching to in-use ahead of the instance
+            # restarting
+            volume_api.attachment_complete(cctxt, new_attachment_id)
+            return 0
+
+        finally:
+            # If the bdm.attachment_id wasn't updated make sure we clean
+            # up any attachments created during the run.
+            bdm = objects.BlockDeviceMapping.get_by_volume_and_instance(
+                cctxt, volume_id, instance.uuid)
+            if (
+                new_attachment_id and
+                bdm.attachment_id != new_attachment_id
+            ):
+                volume_api.attachment_delete(cctxt, new_attachment_id)
+
+            # If we failed during attachment_update the bdm.attachment_id
+            # has already been deleted so recreate it now to ensure the
+            # volume is still associated with the instance and clear the
+            # now stale connection_info.
+            try:
+                volume_api.attachment_get(cctxt, bdm.attachment_id)
+            except exception.VolumeAttachmentNotFound:
+                bdm.attachment_id = volume_api.attachment_create(
+                    cctxt, volume_id, instance.uuid)['id']
+                bdm.connection_info = None
                 bdm.save()
 
-                # Finally mark the attachment as complete, moving the volume
-                # status from attaching to in-use ahead of the instance
-                # restarting
-                volume_api.attachment_complete(cctxt, new_attachment_id)
-                return 0
-
-            finally:
-                # If the bdm.attachment_id wasn't updated make sure we clean
-                # up any attachments created during the run.
-                bdm = objects.BlockDeviceMapping.get_by_volume_and_instance(
-                    cctxt, volume_id, instance_uuid)
-                if (
-                    new_attachment_id and
-                    bdm.attachment_id != new_attachment_id
-                ):
-                    volume_api.attachment_delete(cctxt, new_attachment_id)
-
-                # If we failed during attachment_update the bdm.attachment_id
-                # has already been deleted so recreate it now to ensure the
-                # volume is still associated with the instance and clear the
-                # now stale connection_info.
-                try:
-                    volume_api.attachment_get(cctxt, bdm.attachment_id)
-                except exception.VolumeAttachmentNotFound:
-                    bdm.attachment_id = volume_api.attachment_create(
-                        cctxt, volume_id, instance_uuid)['id']
-                    bdm.connection_info = None
-                    bdm.save()
-
-                # Finish the instance action if it was created and started
-                # TODO(lyarwood): While not really required we should store
-                # the exec and traceback in here on failure.
-                if instance_action:
-                    instance_action.finish()
-
-                # NOTE(lyarwood): As above we need to unlock the instance with
-                # a fresh context and request-id to keep it unique. It's safe
-                # to assume that the instance is locked as this point as the
-                # earlier call to lock isn't part of this block.
-                with context.target_cell(
-                    context.get_admin_context(),
-                    im.cell_mapping
-                ) as u_cctxt:
-                    compute_api.unlock(u_cctxt, instance)
+            # Finish the instance action if it was created and started
+            # TODO(lyarwood): While not really required we should store
+            # the exec and traceback in here on failure.
+            if instance_action:
+                instance_action.finish()
 
     @action_description(
         _("Refresh the connection info for a given volume attachment"))
@@ -3145,6 +3179,7 @@ class VolumeAttachmentCommands(object):
         * 4: Instance does not exist.
         * 5: Instance state invalid.
         * 6: Volume is not attached to instance.
+        * 7: Connector host is not correct.
         """
         try:
             # TODO(lyarwood): Make this optional and provide a rpcapi capable
@@ -3160,6 +3195,12 @@ class VolumeAttachmentCommands(object):
             # Refresh the volume attachment
             return self._refresh(instance_uuid, volume_id, connector)
 
+        except exception.HostConflict as e:
+            print(
+                f"The command 'nova-manage volume_attachment get_connector' "
+                f"may have been run on the wrong compute host. Or the "
+                f"instance host may be wrong and in need of repair.\n{e}")
+            return 7
         except exception.VolumeBDMNotFound as e:
             print(str(e))
             return 6
@@ -3172,11 +3213,14 @@ class VolumeAttachmentCommands(object):
         ) as e:
             print(str(e))
             return 4
-        except (ValueError, OSError):
+        except ValueError as e:
             print(
                 f'Failed to open {connector_path}. Does it contain valid '
-                f'connector_info data?'
+                f'connector_info data?\nError: {str(e)}'
             )
+            return 3
+        except OSError as e:
+            print(str(e))
             return 3
         except exception.InvalidInput as e:
             print(str(e))
@@ -3195,7 +3239,7 @@ class ImagePropertyCommands:
         'instance_uuid', metavar='<instance_uuid>',
         help='UUID of the instance')
     @args(
-        'property', metavar='<image_property>',
+        'image_property', metavar='<image_property>',
         help='Image property to show')
     def show(self, instance_uuid=None, image_property=None):
         """Show value of a given instance image property.
@@ -3213,10 +3257,10 @@ class ImagePropertyCommands:
             with context.target_cell(ctxt, im.cell_mapping) as cctxt:
                 instance = objects.Instance.get_by_uuid(
                     cctxt, instance_uuid, expected_attrs=['system_metadata'])
-                image_property = instance.system_metadata.get(
+                property_value = instance.system_metadata.get(
                     f'image_{image_property}')
-                if image_property:
-                    print(image_property)
+                if property_value:
+                    print(property_value)
                     return 0
                 else:
                     print(f'Image property {image_property} not found '

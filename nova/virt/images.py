@@ -30,6 +30,7 @@ from nova.compute import utils as compute_utils
 import nova.conf
 from nova import exception
 from nova.i18n import _
+from nova.image import format_inspector
 from nova.image import glance
 import nova.privsep.qemu
 
@@ -138,24 +139,100 @@ def check_vmdk_image(image_id, data):
         raise exception.ImageUnacceptable(image_id=image_id, reason=msg)
 
 
+def do_image_deep_inspection(img, image_href, path):
+    ami_formats = ('ami', 'aki', 'ari')
+    disk_format = img['disk_format']
+    try:
+        # NOTE(danms): Use our own cautious inspector module to make sure
+        # the image file passes safety checks.
+        # See https://bugs.launchpad.net/nova/+bug/2059809 for details.
+
+        # Make sure we have a format inspector for the claimed format, else
+        # it is something we do not support and must reject. AMI is excluded.
+        if (disk_format not in ami_formats and
+                not format_inspector.get_inspector(disk_format)):
+            raise exception.ImageUnacceptable(
+                image_id=image_href,
+                reason=_('Image not in a supported format'))
+
+        inspector = format_inspector.detect_file_format(path)
+        if not inspector.safety_check():
+            raise exception.ImageUnacceptable(
+                image_id=image_href,
+                reason=(_('Image does not pass safety check')))
+
+        # AMI formats can be other things, so don't obsess over this
+        # requirement for them. Otherwise, make sure our detection agrees
+        # with glance.
+        if disk_format not in ami_formats and str(inspector) != disk_format:
+            # If we detected the image as something other than glance claimed,
+            # we abort.
+            raise exception.ImageUnacceptable(
+                image_id=image_href,
+                reason=_('Image content does not match disk_format'))
+    except format_inspector.ImageFormatError:
+        # If the inspector we chose based on the image's metadata does not
+        # think the image is the proper format, we refuse to use it.
+        raise exception.ImageUnacceptable(
+            image_id=image_href,
+            reason=_('Image content does not match disk_format'))
+    except Exception:
+        raise exception.ImageUnacceptable(
+            image_id=image_href,
+            reason=_('Image not in a supported format'))
+    if disk_format in ('iso',) + ami_formats:
+        # ISO or AMI image passed safety check; qemu will treat this as raw
+        # from here so return the expected formats it will find.
+        disk_format = 'raw'
+    return disk_format
+
+
 def fetch_to_raw(context, image_href, path, trusted_certs=None):
     path_tmp = "%s.part" % path
     fetch(context, image_href, path_tmp, trusted_certs)
 
     with fileutils.remove_path_on_error(path_tmp):
-        data = qemu_img_info(path_tmp)
+        if not CONF.workarounds.disable_deep_image_inspection:
+            # If we're doing deep inspection, we take the determined format
+            # from it.
+            img = IMAGE_API.get(context, image_href)
+            force_format = do_image_deep_inspection(img, image_href, path_tmp)
+        else:
+            force_format = None
 
+        # Only run qemu-img after we have done deep inspection (if enabled).
+        # If it was not enabled, we will let it detect the format.
+        data = qemu_img_info(path_tmp)
         fmt = data.file_format
         if fmt is None:
             raise exception.ImageUnacceptable(
                 reason=_("'qemu-img info' parsing failed."),
                 image_id=image_href)
+        elif force_format is not None and fmt != force_format:
+            # Format inspector and qemu-img must agree on the format, else
+            # we reject. This will catch VMDK some variants that we don't
+            # explicitly support because qemu will identify them as such
+            # and we will not.
+            LOG.warning('Image %s detected by qemu as %s but we expected %s',
+                        image_href, fmt, force_format)
+            raise exception.ImageUnacceptable(
+                image_id=image_href,
+                reason=_('Image content does not match disk_format'))
 
         backing_file = data.backing_file
         if backing_file is not None:
             raise exception.ImageUnacceptable(image_id=image_href,
                 reason=(_("fmt=%(fmt)s backed by: %(backing_file)s") %
                         {'fmt': fmt, 'backing_file': backing_file}))
+
+        try:
+            data_file = data.format_specific['data']['data-file']
+        except (KeyError, TypeError, AttributeError):
+            data_file = None
+        if data_file is not None:
+            raise exception.ImageUnacceptable(image_id=image_href,
+                reason=(_("fmt=%(fmt)s has data-file: %(data_file)s") %
+                        {'fmt': fmt, 'data_file': data_file}))
 
         if fmt == 'vmdk':
             check_vmdk_image(image_href, data)

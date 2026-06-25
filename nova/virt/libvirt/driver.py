@@ -114,7 +114,7 @@ from nova.virt.image import model as imgmodel
 from nova.virt import images
 from nova.virt.libvirt import blockinfo
 from nova.virt.libvirt import config as vconfig
-from nova.virt.libvirt import cpu as libvirt_cpu
+from nova.virt.libvirt.cpu import api as libvirt_cpu
 from nova.virt.libvirt import designer
 from nova.virt.libvirt import event as libvirtevent
 from nova.virt.libvirt import guest as libvirt_guest
@@ -545,6 +545,15 @@ class LibvirtDriver(driver.ComputeDriver):
         # events about success or failure.
         self._device_event_handler = AsyncDeviceEventsHandler()
 
+        # NOTE(artom) From a pure functionality point of view, there's no need
+        # for this to be an attribute of self. However, we want to test power
+        # management in multinode scenarios (ex: live migration) in our
+        # functional tests. If the power management code was just a bunch of
+        # module level functions, the functional tests would not be able to
+        # distinguish between cores on the source and destination hosts.
+        # See also nova.virt.libvirt.cpu.api.API.core().
+        self.cpu_api = libvirt_cpu.API()
+
     def _discover_vpmems(self, vpmem_conf=None):
         """Discover vpmems on host and configuration.
 
@@ -726,12 +735,31 @@ class LibvirtDriver(driver.ComputeDriver):
                  {'enabled': enabled, 'reason': reason})
         self._set_host_enabled(enabled, reason)
 
+    def _init_host_topology(self):
+        """To work around a bug in libvirt that reports offline CPUs as always
+        being on socket 0 regardless of their real socket, power up all
+        dedicated CPUs (the only ones whose socket we actually care about),
+        then call get_capabilities() to initialize the topology with the
+        correct socket values. get_capabilities()'s implementation will reuse
+        these initial socket value, and avoid clobbering them with 0 for
+        offline CPUs.
+        """
+        cpus = hardware.get_cpu_dedicated_set()
+        if cpus:
+            self.cpu_api.power_up(cpus)
+            self._host.get_capabilities()
+
     def init_host(self, host):
         self._host.initialize()
 
-        self._update_host_specific_capabilities()
-
+        # NOTE(artom) Do this first to make sure our first call to
+        # get_capabilities() happens with all dedicated CPUs online and caches
+        # their correct socket ID. Unused dedicated CPUs will be powered down
+        # further down in this method.
         self._check_cpu_set_configuration()
+        self._init_host_topology()
+
+        self._update_host_specific_capabilities()
 
         self._do_quality_warnings()
 
@@ -822,13 +850,13 @@ class LibvirtDriver(driver.ComputeDriver):
         # modified by Nova before. Note that it can provide an exception if
         # either the governor strategies are different between the cores or if
         # the cores are offline.
-        libvirt_cpu.validate_all_dedicated_cpus()
+        self.cpu_api.validate_all_dedicated_cpus()
         # NOTE(sbauza): We powerdown all dedicated CPUs but if some instances
         # exist that are pinned for some CPUs, then we'll later powerup those
         # CPUs when rebooting the instance in _init_instance()
         # Note that it can provide an exception if the config options are
         # wrongly modified.
-        libvirt_cpu.power_down_all_dedicated_cpus()
+        self.cpu_api.power_down_all_dedicated_cpus()
 
         # TODO(sbauza): Remove this code once mediated devices are persisted
         # across reboots.
@@ -1526,7 +1554,7 @@ class LibvirtDriver(driver.ComputeDriver):
             if CONF.libvirt.virt_type == 'lxc':
                 self._teardown_container(instance)
             # We're sure the instance is gone, we can shutdown the core if so
-            libvirt_cpu.power_down(instance)
+            self.cpu_api.power_down_for_instance(instance)
 
     def destroy(self, context, instance, network_info, block_device_info=None,
                 destroy_disks=True, destroy_secrets=True):
@@ -1586,12 +1614,12 @@ class LibvirtDriver(driver.ComputeDriver):
             cleanup_instance_dir = True
             cleanup_instance_disks = True
         else:
-            # NOTE(mdbooth): I think the theory here was that if this is a
-            # migration with shared block storage then we need to delete the
-            # instance directory because that's not shared. I'm pretty sure
-            # this is wrong.
+            # NOTE(mheler): For shared block storage we only need to clean up
+            # the instance directory when it's not on a shared path.
             if migrate_data and 'is_shared_block_storage' in migrate_data:
-                cleanup_instance_dir = migrate_data.is_shared_block_storage
+                cleanup_instance_dir = (
+                        migrate_data.is_shared_block_storage and
+                        not migrate_data.is_shared_instance_path)
 
             # NOTE(lyarwood): The following workaround allows operators to
             # ensure that non-shared instance directories are removed after an
@@ -2958,11 +2986,7 @@ class LibvirtDriver(driver.ComputeDriver):
         if instance.os_type:
             metadata['properties']['os_type'] = instance.os_type
 
-        # NOTE(vish): glance forces ami disk format to be ami
-        if image_meta.disk_format == 'ami':
-            metadata['disk_format'] = 'ami'
-        else:
-            metadata['disk_format'] = img_fmt
+        metadata['disk_format'] = img_fmt
 
         if image_meta.obj_attr_is_set("container_format"):
             metadata['container_format'] = image_meta.container_format
@@ -3180,7 +3204,7 @@ class LibvirtDriver(driver.ComputeDriver):
 
         current_power_state = guest.get_power_state(self._host)
 
-        libvirt_cpu.power_up(instance)
+        self.cpu_api.power_up_for_instance(instance)
         # TODO(stephenfin): Any reason we couldn't use 'self.resume' here?
         guest.launch(pause=current_power_state == power_state.PAUSED)
 
@@ -6191,10 +6215,8 @@ class LibvirtDriver(driver.ComputeDriver):
             hv.synic = True
             hv.reset = True
             hv.frequencies = True
-            hv.reenlightenment = True
             hv.tlbflush = True
             hv.ipi = True
-            hv.evmcs = True
 
             # NOTE(kosamara): Spoofing the vendor_id aims to allow the nvidia
             # driver to work on windows VMs. At the moment, the nvidia driver
@@ -7663,7 +7685,7 @@ class LibvirtDriver(driver.ComputeDriver):
                 post_xml_callback()
 
             if power_on or pause:
-                libvirt_cpu.power_up(instance)
+                self.cpu_api.power_up_for_instance(instance)
                 guest.launch(pause=pause)
 
             return guest
@@ -10750,6 +10772,16 @@ class LibvirtDriver(driver.ComputeDriver):
                         serial_console.release_port(
                             host=migrate_data.serial_listen_addr, port=port)
 
+                if (
+                    'dst_numa_info' in migrate_data and
+                    migrate_data.dst_numa_info
+                ):
+                    self.cpu_api.power_down_for_migration(
+                        migrate_data.dst_numa_info)
+                else:
+                    LOG.debug('No dst_numa_info in migrate_data, '
+                              'no cores to power down in rollback.')
+
             if not is_shared_instance_path:
                 instance_dir = libvirt_utils.get_instance_path_at_destination(
                     instance, migrate_data)
@@ -10916,6 +10948,12 @@ class LibvirtDriver(driver.ComputeDriver):
 
                 migrate_data.bdms.append(bdmi)
 
+        if 'dst_numa_info' in migrate_data and migrate_data.dst_numa_info:
+            self.cpu_api.power_up_for_migration(migrate_data.dst_numa_info)
+        else:
+            LOG.debug('No dst_numa_info in migrate_data, '
+                      'no cores to power up in pre_live_migration.')
+
         return migrate_data
 
     def _try_fetch_image_cache(self, image, fetch_func, context, filename,
@@ -11079,6 +11117,7 @@ class LibvirtDriver(driver.ComputeDriver):
         :param network_info: instance network information
         """
         self.unplug_vifs(instance, network_info)
+        self.cpu_api.power_down_for_instance(instance)
 
     def _qemu_monitor_announce_self(self, instance):
         """Send announce_self command to QEMU monitor.

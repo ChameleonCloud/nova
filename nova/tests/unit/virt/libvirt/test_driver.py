@@ -894,6 +894,16 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         )
         mock_supports.assert_called_once_with()
 
+    @mock.patch.object(hardware, 'get_cpu_dedicated_set',
+                       return_value=set([0, 42, 1337]))
+    @mock.patch.object(libvirt_driver.LibvirtDriver,
+                       '_register_all_undefined_instance_details')
+    def test_init_host_topology(self, mock_get_cpu_dedicated_set, _):
+        driver = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+        with mock.patch.object(driver.cpu_api, 'power_up') as mock_power_up:
+            driver.init_host('goat')
+            mock_power_up.assert_called_with(set([0, 42, 1337]))
+
     @mock.patch.object(
         libvirt_driver.LibvirtDriver,
         '_register_all_undefined_instance_details',
@@ -9385,7 +9395,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
 
     def test_create_snapshot_metadata(self):
         base = objects.ImageMeta.from_dict(
-            {'disk_format': 'raw'})
+            {'disk_format': 'qcow2'})
         instance_data = {'kernel_id': 'kernel',
                     'project_id': 'prj_id',
                     'ramdisk_id': 'ram_id',
@@ -9417,10 +9427,12 @@ class LibvirtConnTestCase(test.NoDBTestCase,
             {'disk_format': 'ami',
              'container_format': 'test_container'})
         expected['properties']['os_type'] = instance['os_type']
-        expected['disk_format'] = base.disk_format
+        # The disk_format of the snapshot should be the *actual* format of the
+        # thing we upload, regardless of what type of image we booted from.
+        expected['disk_format'] = img_fmt
         expected['container_format'] = base.container_format
         ret = drvr._create_snapshot_metadata(base, instance, img_fmt, snp_name)
-        self.assertEqual(ret, expected)
+        self.assertEqual(expected, ret)
 
     def test_get_volume_driver(self):
         conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
@@ -14497,10 +14509,11 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                                             '/fake/instance/dir', disk_info)
         self.assertFalse(mock_fetch_image.called)
 
+    @mock.patch('nova.image.format_inspector.detect_file_format')
     @mock.patch('nova.privsep.path.utime')
     @mock.patch('nova.virt.libvirt.utils.create_image')
     def test_create_images_and_backing_ephemeral_gets_created(
-            self, mock_create_cow_image, mock_utime):
+            self, mock_create_cow_image, mock_utime, mock_detect):
         drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
 
         base_dir = os.path.join(CONF.instances_path,
@@ -16240,11 +16253,13 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         fake_mkfs.assert_has_calls([mock.call('ext4', '/dev/something',
                                               'myVol')])
 
+    @mock.patch('nova.image.format_inspector.detect_file_format')
     @mock.patch('nova.privsep.path.utime')
     @mock.patch('nova.virt.libvirt.utils.fetch_image')
     @mock.patch('nova.virt.libvirt.utils.create_image')
     def test_create_ephemeral_specified_fs_not_valid(
-            self, mock_create_cow_image, mock_fetch_image, mock_utime):
+            self, mock_create_cow_image, mock_fetch_image, mock_utime,
+            mock_detect):
         CONF.set_override('default_ephemeral_format', 'ext4')
         ephemerals = [{'device_type': 'disk',
                        'disk_bus': 'virtio',
@@ -20433,7 +20448,8 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         # is_shared_block_storage=True and destroy_disks=False.
         instance = objects.Instance(self.context, **self.test_instance)
         migrate_data = objects.LibvirtLiveMigrateData(
-                is_shared_block_storage=True)
+                is_shared_block_storage=True,
+                is_shared_instance_path=False)
         drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI())
         drvr.cleanup(
             self.context, instance, network_info={}, destroy_disks=False,
@@ -20442,6 +20458,25 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         self.assertEqual(1, int(instance.system_metadata['clean_attempts']))
         self.assertTrue(instance.cleaned)
         save.assert_called_once_with()
+
+    @mock.patch.object(libvirt_driver.LibvirtDriver, 'delete_instance_files',
+                       return_value=True)
+    @mock.patch.object(objects.Instance, 'save')
+    @mock.patch.object(libvirt_driver.LibvirtDriver, '_undefine_domain')
+    def test_cleanup_migrate_data_block_storage_and_share_instance_dir(
+        self, _undefine_domain, save, delete_instance_files
+    ):
+        # Test the case when the instance directory is on shared storage
+        # (e.g. NFS) and the instance is booted form volume.
+        instance = objects.Instance(self.context, **self.test_instance)
+        migrate_data = objects.LibvirtLiveMigrateData(
+                is_shared_block_storage=True,
+                is_shared_instance_path=True)
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI())
+        drvr.cleanup(
+            self.context, instance, network_info={}, destroy_disks=False,
+            migrate_data=migrate_data, destroy_vifs=False)
+        delete_instance_files.assert_not_called()
 
     @mock.patch.object(libvirt_driver.LibvirtDriver, 'delete_instance_files',
                        return_value=True)
@@ -27879,10 +27914,15 @@ class LibvirtDriverTestCase(test.NoDBTestCase, TraitsComparisonMixin):
         self.assertTrue(hv.synic)
         self.assertTrue(hv.reset)
         self.assertTrue(hv.frequencies)
-        self.assertTrue(hv.reenlightenment)
+        # NOTE(jie) reenlightenment will cause instances live-migration
+        # failure, so don't enable it now. See bug 2046549.
+        self.assertFalse(hv.reenlightenment)
         self.assertTrue(hv.tlbflush)
         self.assertTrue(hv.ipi)
-        self.assertTrue(hv.evmcs)
+        # NOTE(artom) evmcs only works on Intel hosts, so we can't enable it
+        # unconditionally. Until we become smarter about it, just don't enable
+        # it at all. See bug 2009280.
+        self.assertFalse(hv.evmcs)
 
 
 class LibvirtVolumeUsageTestCase(test.NoDBTestCase):
@@ -28992,7 +29032,8 @@ class LibvirtSnapshotTests(_BaseSnapshotTests):
           utils.get_system_metadata_from_image(
             {'disk_format': 'ami'})
 
-        self._test_snapshot(disk_format='ami')
+        # If we're uploading a qcow2, we must set the disk_format as such
+        self._test_snapshot(disk_format='qcow2')
 
     @mock.patch('nova.virt.libvirt.utils.get_disk_type_from_path',
                 new=mock.Mock(return_value=None))

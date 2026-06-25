@@ -10,9 +10,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from unittest import mock
-
 import fixtures
+
+from unittest import mock
 
 from nova import context as nova_context
 from nova import exception
@@ -21,7 +21,7 @@ from nova.tests import fixtures as nova_fixtures
 from nova.tests.fixtures import libvirt as fakelibvirt
 from nova.tests.functional.libvirt import base
 from nova.virt import hardware
-from nova.virt.libvirt import cpu
+from nova.virt.libvirt.cpu import api as cpu_api
 
 
 class PowerManagementTestsBase(base.ServersTestBase):
@@ -59,8 +59,15 @@ class PowerManagementTestsBase(base.ServersTestBase):
             'hw:cpu_policy': 'dedicated',
             'hw:cpu_thread_policy': 'prefer',
         }
+        self.isolate_extra_spec = {
+            'hw:cpu_policy': 'dedicated',
+            'hw:cpu_thread_policy': 'prefer',
+            'hw:emulator_threads_policy': 'isolate',
+        }
         self.pcpu_flavor_id = self._create_flavor(
             vcpu=4, extra_spec=self.extra_spec)
+        self.isolate_flavor_id = self._create_flavor(
+            vcpu=4, extra_spec=self.isolate_extra_spec)
 
     def _assert_server_cpus_state(self, server, expected='online'):
         inst = objects.Instance.get_by_uuid(self.ctxt, server['id'])
@@ -73,7 +80,7 @@ class PowerManagementTestsBase(base.ServersTestBase):
 
     def _assert_cpu_set_state(self, cpu_set, expected='online'):
         for i in cpu_set:
-            core = cpu.Core(i)
+            core = cpu_api.Core(i)
             if expected == 'online':
                 self.assertTrue(core.online, f'{i} is not online')
             elif expected == 'offline':
@@ -82,6 +89,136 @@ class PowerManagementTestsBase(base.ServersTestBase):
                 self.assertEqual('powersave', core.governor)
             elif expected == 'performance':
                 self.assertEqual('performance', core.governor)
+
+
+class FakeCore(object):
+
+    def __init__(self, i):
+        self.ident = i
+        self.power_state = 'online'
+
+    @property
+    def online(self):
+        return self.power_state == 'online'
+
+    @online.setter
+    def online(self, state):
+        if state:
+            self.power_state = 'online'
+        else:
+            self.power_state = 'offline'
+
+
+class CoresStub(object):
+
+    def __init__(self):
+        self.cores = {}
+
+    def __call__(self, i):
+        if i not in self.cores:
+            self.cores[i] = FakeCore(i)
+        return self.cores[i]
+
+
+class PowerManagementLiveMigrationTestsBase(base.LibvirtMigrationMixin,
+                                            PowerManagementTestsBase):
+
+    def setUp(self):
+        super().setUp()
+
+        self.useFixture(nova_fixtures.SysFileSystemFixture())
+        self.flags(cpu_dedicated_set='1-9', cpu_shared_set=None,
+                   group='compute')
+        self.flags(vcpu_pin_set=None)
+        self.flags(cpu_power_management=True, group='libvirt')
+
+        # NOTE(artom) Fill up all dedicated CPUs (either with only the
+        # instance's CPUs, or instance CPUs + 1 emulator thread). This makes
+        # the assertions further down easier.
+        self.pcpu_flavor_id = self._create_flavor(
+            vcpu=9, extra_spec=self.extra_spec)
+        self.isolate_flavor_id = self._create_flavor(
+            vcpu=8, extra_spec=self.isolate_extra_spec)
+
+        self.start_compute(
+            host_info=fakelibvirt.HostInfo(cpu_nodes=1, cpu_sockets=1,
+                                           cpu_cores=5, cpu_threads=2),
+            hostname='src')
+        self.src = self.computes['src']
+        self.src.driver.cpu_api.core = CoresStub()
+        # NOTE(artom) In init_host() the libvirt driver calls
+        # power_down_all_dedicated_cpus(). Call it again now after swapping to
+        # our stub to fake reality.
+        self.src.driver.cpu_api.power_down_all_dedicated_cpus()
+
+        self.start_compute(
+            host_info=fakelibvirt.HostInfo(cpu_nodes=1, cpu_sockets=1,
+                                           cpu_cores=5, cpu_threads=2),
+            hostname='dest')
+        self.dest = self.computes['dest']
+        self.dest.driver.cpu_api.power_down_all_dedicated_cpus()
+
+    def assert_cores(self, host, cores, online=True):
+        for i in cores:
+            self.assertEqual(online, host.driver.cpu_api.core(i).online)
+
+
+class PowerManagementLiveMigrationTests(PowerManagementLiveMigrationTestsBase):
+
+    def test_live_migrate_server(self):
+        self.server = self._create_server(
+            flavor_id=self.pcpu_flavor_id,
+            expected_state='ACTIVE', host='src')
+        server = self._live_migrate(self.server)
+        self.assertEqual('dest', server['OS-EXT-SRV-ATTR:host'])
+        # We've powered down the source cores, and powered up the destination
+        # ones.
+        self.assert_cores(self.src, range(1, 10), online=False)
+        self.assert_cores(self.dest, range(1, 10), online=True)
+
+    def test_live_migrate_server_with_emulator_threads_isolate(self):
+        self.server = self._create_server(
+            flavor_id=self.isolate_flavor_id,
+            expected_state='ACTIVE', host='src')
+        server = self._live_migrate(self.server)
+        self.assertEqual('dest', server['OS-EXT-SRV-ATTR:host'])
+        # We're using a flavor with 8 CPUs, but with the extra dedicated CPU
+        # for the emulator threads, we expect all 9 cores to be powered up on
+        # the dest, and down on the source.
+        self.assert_cores(self.src, range(1, 10), online=False)
+        self.assert_cores(self.dest, range(1, 10), online=True)
+
+
+class PowerManagementLiveMigrationRollbackTests(
+    PowerManagementLiveMigrationTestsBase):
+
+    def _migrate_stub(self, domain, destination, params, flags):
+        conn = self.src.driver._host.get_connection()
+        dom = conn.lookupByUUIDString(self.server['id'])
+        dom.fail_job()
+
+    def test_live_migrate_server_rollback(self):
+        self.server = self._create_server(
+            flavor_id=self.pcpu_flavor_id,
+            expected_state='ACTIVE', host='src')
+        server = self._live_migrate(self.server,
+                                    migration_expected_state='failed')
+        self.assertEqual('src', server['OS-EXT-SRV-ATTR:host'])
+        self.assert_cores(self.src, range(1, 10), online=True)
+        self.assert_cores(self.dest, range(1, 10), online=False)
+
+    def test_live_migrate_server_with_emulator_threads_isolate_rollback(self):
+        self.server = self._create_server(
+            flavor_id=self.isolate_flavor_id,
+            expected_state='ACTIVE', host='src')
+        server = self._live_migrate(self.server,
+                                    migration_expected_state='failed')
+        self.assertEqual('src', server['OS-EXT-SRV-ATTR:host'])
+        # We're using a flavor with 8 CPUs, but with the extra dedicated CPU
+        # for the emulator threads, we expect all 9 cores to be powered back
+        # down on the dest, and up on the source.
+        self.assert_cores(self.src, range(1, 10), online=True)
+        self.assert_cores(self.dest, range(1, 10), online=False)
 
 
 class PowerManagementTests(PowerManagementTestsBase):
@@ -103,7 +240,6 @@ class PowerManagementTests(PowerManagementTestsBase):
                                          cpu_cores=5, cpu_threads=2)
         self.compute1 = self.start_compute(host_info=self.host_info,
                                            hostname='compute1')
-
         # All cores are shutdown at startup, let's check.
         cpu_dedicated_set = hardware.get_cpu_dedicated_set()
         self._assert_cpu_set_state(cpu_dedicated_set, expected='offline')
@@ -129,6 +265,70 @@ class PowerManagementTests(PowerManagementTestsBase):
         cpu_dedicated_set = hardware.get_cpu_dedicated_set()
         unused_cpus = cpu_dedicated_set - instance_pcpus
         self._assert_cpu_set_state(unused_cpus, expected='offline')
+        return server
+
+    def test_delete_server(self):
+        server = self.test_create_server()
+        self._delete_server(server)
+        # Let's verify that the pinned CPUs are now offline
+        cpu_dedicated_set = hardware.get_cpu_dedicated_set()
+        self._assert_cpu_set_state(cpu_dedicated_set, expected='offline')
+
+    def test_delete_server_device_busy(self):
+        # This test verifies bug 2065927 is resolved.
+        server = self.test_create_server()
+        inst = objects.Instance.get_by_uuid(self.ctxt, server['id'])
+        instance_pcpus = inst.numa_topology.cpu_pinning
+        self._assert_cpu_set_state(instance_pcpus, expected='online')
+        with mock.patch(
+            'nova.filesystem.write_sys.__wrapped__',
+            side_effect=[
+                exception.DeviceBusy(file_path='fake'),
+                None]):
+
+            self._delete_server(server)
+        cpu_dedicated_set = hardware.get_cpu_dedicated_set()
+        # Verify that the unused CPUs are still offline
+        unused_cpus = cpu_dedicated_set - instance_pcpus
+        self._assert_cpu_set_state(unused_cpus, expected='offline')
+        # and the pinned CPUs are offline
+        self._assert_cpu_set_state(instance_pcpus, expected='offline')
+
+    def test_create_server_with_emulator_threads_isolate(self):
+        server = self._create_server(
+            flavor_id=self.isolate_flavor_id,
+            expected_state='ACTIVE')
+        # Let's verify that the pinned CPUs are now online
+        self._assert_server_cpus_state(server, expected='online')
+        instance = objects.Instance.get_by_uuid(self.ctxt, server['id'])
+        numa_topology = instance.numa_topology
+        # Make sure we've pinned the emulator threads to a separate core
+        self.assertTrue(numa_topology.cpuset_reserved)
+        self.assertTrue(
+            numa_topology.cpu_pinning.isdisjoint(
+                numa_topology.cpuset_reserved))
+        self._assert_cpu_set_state(numa_topology.cpuset_reserved,
+                                   expected='online')
+
+    def test_start_stop_server_with_emulator_threads_isolate(self):
+        server = self._create_server(
+            flavor_id=self.isolate_flavor_id,
+            expected_state='ACTIVE')
+        # Let's verify that the pinned CPUs are now online
+        self._assert_server_cpus_state(server, expected='online')
+        instance = objects.Instance.get_by_uuid(self.ctxt, server['id'])
+        numa_topology = instance.numa_topology
+        # Make sure we've pinned the emulator threads to a separate core
+        self.assertTrue(numa_topology.cpuset_reserved)
+        self.assertTrue(
+            numa_topology.cpu_pinning.isdisjoint(
+                numa_topology.cpuset_reserved))
+        self._assert_cpu_set_state(numa_topology.cpuset_reserved,
+                                   expected='online')
+        # Stop and assert we've powered down the emulator threads core as well
+        server = self._stop_server(server)
+        self._assert_cpu_set_state(numa_topology.cpuset_reserved,
+                                   expected='offline')
 
     def test_stop_start_server(self):
         server = self._create_server(
@@ -211,13 +411,46 @@ class PowerManagementTestsGovernor(PowerManagementTestsBase):
 
     def test_changing_strategy_fails(self):
         # Arbitratly set a core governor strategy to be performance
-        cpu.Core(1).set_high_governor()
+        cpu_api.Core(1).set_high_governor()
         # and then forget about it while changing the strategy.
         self.flags(cpu_power_management_strategy='cpu_state', group='libvirt')
         # This time, this wouldn't be acceptable as some core would have a
         # difference performance while Nova would only online/offline it.
         self.assertRaises(exception.InvalidConfiguration,
                           self.restart_compute_service, hostname='compute1')
+
+
+class PowerManagementTestsGovernorNotSupported(PowerManagementTestsBase):
+    """Test suite for OS without governor support usage (same 10-core host)"""
+
+    def setUp(self):
+        super(PowerManagementTestsGovernorNotSupported, self).setUp()
+
+        self.useFixture(nova_fixtures.SysFileSystemFixture(
+            cpufreq_enabled=False))
+
+        # Definining the CPUs to be pinned.
+        self.flags(cpu_dedicated_set='1-9', cpu_shared_set=None,
+                   group='compute')
+        self.flags(vcpu_pin_set=None)
+        self.flags(cpu_power_management=True, group='libvirt')
+        self.flags(cpu_power_management_strategy='cpu_state', group='libvirt')
+
+        self.flags(allow_resize_to_same_host=True)
+        self.host_info = fakelibvirt.HostInfo(cpu_nodes=1, cpu_sockets=1,
+                                              cpu_cores=5, cpu_threads=2)
+
+    def test_enabling_governor_strategy_fails(self):
+        self.flags(cpu_power_management_strategy='governor', group='libvirt')
+        self.assertRaises(exception.FileNotFound, self.start_compute,
+                          host_info=self.host_info, hostname='compute1')
+
+    def test_enabling_cpu_state_strategy_works(self):
+        self.flags(cpu_power_management_strategy='cpu_state', group='libvirt')
+        self.compute1 = self.start_compute(host_info=self.host_info,
+                                           hostname='compute1')
+        cpu_dedicated_set = hardware.get_cpu_dedicated_set()
+        self._assert_cpu_set_state(cpu_dedicated_set, expected='offline')
 
 
 class PowerManagementMixedInstances(PowerManagementTestsBase):

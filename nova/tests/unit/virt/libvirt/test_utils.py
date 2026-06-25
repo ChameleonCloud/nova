@@ -29,6 +29,7 @@ from oslo_utils.fixture import uuidsentinel as uuids
 from nova.compute import utils as compute_utils
 from nova import context
 from nova import exception
+from nova.image import format_inspector
 from nova import objects
 from nova.objects import fields as obj_fields
 import nova.privsep.fs
@@ -106,15 +107,30 @@ class LibvirtUtilsTestCase(test.NoDBTestCase):
     @mock.patch('tempfile.NamedTemporaryFile')
     @mock.patch('oslo_concurrency.processutils.execute')
     @mock.patch('nova.virt.images.qemu_img_info')
+    @mock.patch('nova.image.format_inspector.detect_file_format')
     def _test_create_image(
-        self, path, disk_format, disk_size, mock_info, mock_execute,
-        mock_ntf, backing_file=None, encryption=None
+        self, path, disk_format, disk_size, mock_detect, mock_info,
+        mock_execute, mock_ntf, backing_file=None, encryption=None,
+        safety_check=True
     ):
+        if isinstance(backing_file, dict):
+            backing_info = backing_file
+            backing_file = backing_info.pop('file', None)
+        else:
+            backing_info = {}
+        backing_backing_file = backing_info.pop('backing_file', None)
+        backing_fmt = backing_info.pop('backing_fmt',
+                                       mock.sentinel.backing_fmt)
+
         mock_info.return_value = mock.Mock(
-            file_format=mock.sentinel.backing_fmt,
+            file_format=backing_fmt,
             cluster_size=mock.sentinel.cluster_size,
+            backing_file=backing_backing_file,
+            format_specific=backing_info,
         )
         fh = mock_ntf.return_value.__enter__.return_value
+
+        mock_detect.return_value.safety_check.return_value = safety_check
 
         libvirt_utils.create_image(
             path, disk_format, disk_size, backing_file=backing_file,
@@ -129,8 +145,8 @@ class LibvirtUtilsTestCase(test.NoDBTestCase):
             mock_info.assert_called_once_with(backing_file)
             cow_opts = [
                 '-o',
-                f'backing_file={mock.sentinel.backing_file},'
-                f'backing_fmt={mock.sentinel.backing_fmt},'
+                f'backing_file={backing_file},'
+                f'backing_fmt={backing_fmt},'
                 f'cluster_size={mock.sentinel.cluster_size}',
             ]
 
@@ -165,6 +181,8 @@ class LibvirtUtilsTestCase(test.NoDBTestCase):
             expected_args += (disk_size,)
 
         self.assertEqual([(expected_args,)], mock_execute.call_args_list)
+        if backing_file:
+            mock_detect.return_value.safety_check.assert_called_once_with()
 
     def test_create_image_raw(self):
         self._test_create_image('/some/path', 'raw', '10G')
@@ -180,10 +198,48 @@ class LibvirtUtilsTestCase(test.NoDBTestCase):
             backing_file=mock.sentinel.backing_file,
         )
 
+    def test_create_image_base_has_backing_file(self):
+        self.assertRaises(
+            exception.InvalidDiskInfo,
+            self._test_create_image,
+            '/some/stuff', 'qcow2', '1234567891234',
+            backing_file={'file': mock.sentinel.backing_file,
+                          'backing_file': mock.sentinel.backing_backing_file},
+        )
+
+    def test_create_image_base_has_data_file(self):
+        self.assertRaises(
+            exception.InvalidDiskInfo,
+            self._test_create_image,
+            '/some/stuff', 'qcow2', '1234567891234',
+            backing_file={'file': mock.sentinel.backing_file,
+                          'backing_file': mock.sentinel.backing_backing_file,
+                          'data': {'data-file': mock.sentinel.data_file}},
+        )
+
     def test_create_image_size_none(self):
         self._test_create_image(
             '/some/stuff', 'qcow2', None,
             backing_file=mock.sentinel.backing_file,
+        )
+
+    def test_create_image_vmdk(self):
+        self._test_create_image(
+            '/some/vmdk', 'vmdk', '1234567891234',
+            backing_file={'file': mock.sentinel.backing_file,
+                          'backing_fmt': 'vmdk',
+                          'backing_file': None,
+                          'data': {'create-type': 'monolithicSparse'}}
+        )
+
+    def test_create_image_vmdk_invalid_type(self):
+        self.assertRaises(exception.ImageUnacceptable,
+            self._test_create_image,
+            '/some/vmdk', 'vmdk', '1234567891234',
+            backing_file={'file': mock.sentinel.backing_file,
+                          'backing_fmt': 'vmdk',
+                          'backing_file': None,
+                          'data': {'create-type': 'monolithicFlat'}}
         )
 
     def test_create_image_encryption(self):
@@ -386,11 +442,13 @@ class LibvirtUtilsTestCase(test.NoDBTestCase):
         mock_images.assert_called_once_with(
             _context, image_id, target, trusted_certs)
 
+    @mock.patch.object(images, 'IMAGE_API')
+    @mock.patch.object(format_inspector, 'detect_file_format')
     @mock.patch.object(compute_utils, 'disk_ops_semaphore')
     @mock.patch('nova.privsep.utils.supports_direct_io', return_value=True)
     @mock.patch('nova.privsep.qemu.unprivileged_convert_image')
     def test_fetch_raw_image(self, mock_convert_image, mock_direct_io,
-                             mock_disk_op_sema):
+                             mock_disk_op_sema, mock_detect, mock_glance):
 
         def fake_rename(old, new):
             self.executes.append(('mv', old, new))
@@ -401,7 +459,7 @@ class LibvirtUtilsTestCase(test.NoDBTestCase):
         def fake_rm_on_error(path, remove=None):
             self.executes.append(('rm', '-f', path))
 
-        def fake_qemu_img_info(path):
+        def fake_qemu_img_info(path, format=None):
             class FakeImgInfo(object):
                 pass
 
@@ -419,6 +477,7 @@ class LibvirtUtilsTestCase(test.NoDBTestCase):
             FakeImgInfo.file_format = file_format
             FakeImgInfo.backing_file = backing_file
             FakeImgInfo.virtual_size = 1
+            FakeImgInfo.format_specific = None if file_format == 'raw' else {}
 
             return FakeImgInfo()
 
@@ -428,6 +487,8 @@ class LibvirtUtilsTestCase(test.NoDBTestCase):
         self.stub_out('nova.virt.images.qemu_img_info', fake_qemu_img_info)
         self.stub_out('oslo_utils.fileutils.delete_if_exists',
                       fake_rm_on_error)
+
+        mock_inspector = mock_detect.return_value
 
         # Since the remove param of fileutils.remove_path_on_error()
         # is initialized at load time, we must provide a wrapper
@@ -439,6 +500,10 @@ class LibvirtUtilsTestCase(test.NoDBTestCase):
         context = 'opaque context'
         image_id = '4'
 
+        # Make sure qcow2 gets converted to raw
+        mock_inspector.safety_check.return_value = True
+        mock_inspector.__str__.return_value = 'qcow2'
+        mock_glance.get.return_value = {'disk_format': 'qcow2'}
         target = 't.qcow2'
         self.executes = []
         expected_commands = [('rm', 't.qcow2.part'),
@@ -450,14 +515,30 @@ class LibvirtUtilsTestCase(test.NoDBTestCase):
             't.qcow2.part', 't.qcow2.converted', 'qcow2', 'raw',
             CONF.instances_path, False)
         mock_convert_image.reset_mock()
+        mock_inspector.safety_check.assert_called_once_with()
+        mock_detect.assert_called_once_with('t.qcow2.part')
 
+        # Make sure raw does not get converted
+        mock_detect.reset_mock()
+        mock_inspector.safety_check.reset_mock()
+        mock_inspector.safety_check.return_value = True
+        mock_inspector.__str__.return_value = 'raw'
+        mock_glance.get.return_value = {'disk_format': 'raw'}
         target = 't.raw'
         self.executes = []
         expected_commands = [('mv', 't.raw.part', 't.raw')]
         images.fetch_to_raw(context, image_id, target)
         self.assertEqual(self.executes, expected_commands)
         mock_convert_image.assert_not_called()
+        mock_inspector.safety_check.assert_called_once_with()
+        mock_detect.assert_called_once_with('t.raw.part')
 
+        # Make sure safety check failure prevents us from proceeding
+        mock_detect.reset_mock()
+        mock_inspector.safety_check.reset_mock()
+        mock_inspector.safety_check.return_value = False
+        mock_inspector.__str__.return_value = 'qcow2'
+        mock_glance.get.return_value = {'disk_format': 'qcow2'}
         target = 'backing.qcow2'
         self.executes = []
         expected_commands = [('rm', '-f', 'backing.qcow2.part')]
@@ -465,6 +546,24 @@ class LibvirtUtilsTestCase(test.NoDBTestCase):
                           images.fetch_to_raw, context, image_id, target)
         self.assertEqual(self.executes, expected_commands)
         mock_convert_image.assert_not_called()
+        mock_inspector.safety_check.assert_called_once_with()
+        mock_detect.assert_called_once_with('backing.qcow2.part')
+
+        # Make sure a format mismatch prevents us from proceeding
+        mock_detect.reset_mock()
+        mock_inspector.safety_check.reset_mock()
+        mock_inspector.safety_check.side_effect = (
+            format_inspector.ImageFormatError)
+        mock_glance.get.return_value = {'disk_format': 'qcow2'}
+        target = 'backing.qcow2'
+        self.executes = []
+        expected_commands = [('rm', '-f', 'backing.qcow2.part')]
+        self.assertRaises(exception.ImageUnacceptable,
+                          images.fetch_to_raw, context, image_id, target)
+        self.assertEqual(self.executes, expected_commands)
+        mock_convert_image.assert_not_called()
+        mock_inspector.safety_check.assert_called_once_with()
+        mock_detect.assert_called_once_with('backing.qcow2.part')
 
         del self.executes
 

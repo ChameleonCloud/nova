@@ -21,6 +21,7 @@ import fixtures
 import netaddr
 import os_resource_classes as orc
 import os_vif
+from oslo_concurrency import processutils
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import importutils
@@ -239,8 +240,16 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
     def test_snapshot_running(self):
         img_ref = self.image_service.create(self.ctxt, {'name': 'snap-1'})
         instance_ref, network_info = self._get_running_instance()
-        self.connection.snapshot(self.ctxt, instance_ref, img_ref['id'],
-                                 lambda *args, **kwargs: None)
+        # this test depends on qemu-img
+        # being installed and in the path,
+        # if it is not installed, skip
+        try:
+            self.connection.snapshot(self.ctxt, instance_ref, img_ref['id'],
+                                     lambda *args, **kwargs: None)
+        except processutils.ProcessExecutionError as e:
+            if 'qemu-img' in e.stderr and 'No such file' in e.stderr:
+                self.skipTest("qemu-img not installed")
+            raise e
 
     @catch_notimplementederror
     def test_reboot(self):
@@ -838,6 +847,11 @@ class LibvirtConnTestCase(_VirtDriverTestCase, test.TestCase):
         # since we don't care about it.
         self.stub_out('os_vif.unplug', lambda a, kw: None)
         self.stub_out('nova.compute.utils.get_machine_ips', lambda: [])
+        self.stub_out('nova.virt.libvirt.utils.get_disk_size',
+                      lambda *a, **k: 123456)
+        self.stub_out('nova.virt.libvirt.utils.get_disk_backing_file',
+                      lambda *a, **k: None)
+        self.stub_out('nova.privsep.path.chown', lambda *a, **k: None)
 
     def test_init_host_image_type_rbd_force_raw_images_true(self):
         CONF.set_override('images_type', 'rbd', group='libvirt')

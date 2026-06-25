@@ -62,6 +62,7 @@ from nova import objects
 from nova.objects import base as objects_base
 from nova import quota
 from nova.scheduler.client import report
+from nova.scheduler import utils as scheduler_utils
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.unit import matchers
 from nova import utils
@@ -309,6 +310,19 @@ class TestCase(base.BaseTestCase):
         # local filesystem when we generate a new one).
         if self.STUB_COMPUTE_ID:
             self.useFixture(nova_fixtures.ComputeNodeIdFixture())
+
+        # Reset globals indicating affinity filter support. Some tests may set
+        # self.flags(enabled_filters=...) which could make the affinity filter
+        # support globals get set to a non-default configuration which affects
+        # all other tests.
+        scheduler_utils.reset_globals()
+
+        # Wait for bare greenlets spawn_n()'ed from a GreenThreadPoolExecutor
+        # to finish before moving on from the test. When greenlets from a
+        # previous test remain running, they may attempt to access structures
+        # (like the database) that have already been torn down and can cause
+        # the currently running test to fail.
+        self.useFixture(nova_fixtures.GreenThreadPoolShutdownWait())
 
     def _setup_cells(self):
         """Setup a normal cellsv2 environment.

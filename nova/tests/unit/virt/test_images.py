@@ -99,11 +99,18 @@ class QemuTestCase(test.NoDBTestCase):
         exists.assert_called_once_with(path)
         mocked_execute.assert_called_once()
 
+    @mock.patch.object(images, 'IMAGE_API')
+    @mock.patch('nova.image.format_inspector.detect_file_format')
     @mock.patch.object(images, 'convert_image',
                        side_effect=exception.ImageUnacceptable)
     @mock.patch.object(images, 'qemu_img_info')
     @mock.patch.object(images, 'fetch')
-    def test_fetch_to_raw_errors(self, convert_image, qemu_img_info, fetch):
+    def test_fetch_to_raw_errors(self, convert_image, qemu_img_info, fetch,
+                                 mock_detect, glance):
+        inspector = mock_detect.return_value
+        inspector.safety_check.return_value = True
+        inspector.__str__.return_value = 'qcow2'
+        glance.get.return_value = {'disk_format': 'qcow2'}
         qemu_img_info.backing_file = None
         qemu_img_info.file_format = 'qcow2'
         qemu_img_info.virtual_size = 20
@@ -111,6 +118,48 @@ class QemuTestCase(test.NoDBTestCase):
                                'Image href123 is unacceptable.*',
                                images.fetch_to_raw,
                                None, 'href123', '/no/path')
+
+    @mock.patch.object(images, 'IMAGE_API')
+    @mock.patch('nova.image.format_inspector.detect_file_format')
+    @mock.patch.object(images, 'convert_image',
+                       side_effect=exception.ImageUnacceptable)
+    @mock.patch.object(images, 'qemu_img_info')
+    @mock.patch.object(images, 'fetch')
+    def test_fetch_to_raw_data_file(self, convert_image, qemu_img_info_fn,
+                                    fetch, mock_detect, mock_glance):
+        mock_glance.get.return_value = {'disk_format': 'qcow2'}
+        inspector = mock_detect.return_value
+        inspector.safety_check.return_value = True
+        inspector.__str__.return_value = 'qcow2'
+        # NOTE(danms): the above test needs the following line as well, as it
+        # is broken without it.
+        qemu_img_info = qemu_img_info_fn.return_value
+        qemu_img_info.backing_file = None
+        qemu_img_info.file_format = 'qcow2'
+        qemu_img_info.virtual_size = 20
+        qemu_img_info.format_specific = {'data': {'data-file': 'somefile'}}
+        self.assertRaisesRegex(exception.ImageUnacceptable,
+                               'Image href123 is unacceptable.*somefile',
+                               images.fetch_to_raw,
+                               None, 'href123', '/no/path')
+
+    @mock.patch('nova.image.format_inspector.detect_file_format')
+    @mock.patch.object(images, 'IMAGE_API')
+    @mock.patch('os.rename')
+    @mock.patch.object(images, 'qemu_img_info')
+    @mock.patch.object(images, 'fetch')
+    def test_fetch_to_raw_from_raw(self, fetch, qemu_img_info_fn, mock_rename,
+                                   mock_glance, mock_detect):
+        # Make sure we support a case where we fetch an already-raw image and
+        # qemu-img returns None for "format_specific".
+        mock_glance.get.return_value = {'disk_format': 'raw'}
+        mock_detect.return_value.__str__.return_value = 'raw'
+        qemu_img_info = qemu_img_info_fn.return_value
+        qemu_img_info.file_format = 'raw'
+        qemu_img_info.backing_file = None
+        qemu_img_info.format_specific = None
+        images.fetch_to_raw(None, 'href123', '/no/path')
+        mock_rename.assert_called_once_with('/no/path.part', '/no/path')
 
     @mock.patch.object(compute_utils, 'disk_ops_semaphore')
     @mock.patch('nova.privsep.utils.supports_direct_io', return_value=True)
@@ -167,9 +216,16 @@ class QemuTestCase(test.NoDBTestCase):
                           imageutils.QemuImgInfo(jsonutils.dumps(info),
                                                  format='json'))
 
+    @mock.patch.object(images, 'IMAGE_API')
+    @mock.patch('nova.image.format_inspector.detect_file_format')
     @mock.patch.object(images, 'fetch')
     @mock.patch('nova.privsep.qemu.unprivileged_qemu_img_info')
-    def test_fetch_checks_vmdk_rules(self, mock_info, mock_fetch):
+    def test_fetch_checks_vmdk_rules(self, mock_info, mock_fetch, mock_detect,
+                                     mock_glance):
+        mock_glance.get.return_value = {'disk_format': 'vmdk'}
+        inspector = mock_detect.return_value
+        inspector.safety_check.return_value = True
+        inspector.__str__.return_value = 'vmdk'
         info = {'format': 'vmdk',
                 'format-specific': {
                     'type': 'vmdk',
@@ -181,3 +237,148 @@ class QemuTestCase(test.NoDBTestCase):
             e = self.assertRaises(exception.ImageUnacceptable,
                                   images.fetch_to_raw, None, 'foo', 'anypath')
             self.assertIn('Invalid VMDK create-type specified', str(e))
+
+    @mock.patch('os.rename')
+    @mock.patch.object(images, 'IMAGE_API')
+    @mock.patch('nova.image.format_inspector.get_inspector')
+    @mock.patch('nova.image.format_inspector.detect_file_format')
+    @mock.patch.object(images, 'fetch')
+    @mock.patch('nova.privsep.qemu.unprivileged_qemu_img_info')
+    def test_fetch_iso_is_raw(
+        self, mock_info, mock_fetch, mock_detect_file_format, mock_gi,
+        mock_glance, mock_rename):
+        mock_glance.get.return_value = {'disk_format': 'iso'}
+        inspector = mock_gi.return_value.from_file.return_value
+        inspector.safety_check.return_value = True
+        inspector.__str__.return_value = 'iso'
+        mock_detect_file_format.return_value = inspector
+        # qemu-img does not have a parser for iso so it is treated as raw
+        info = {
+            "virtual-size": 356352,
+            "filename": "foo.iso",
+            "format": "raw",
+            "actual-size": 356352,
+            "dirty-flag": False
+        }
+        mock_info.return_value = jsonutils.dumps(info)
+        with mock.patch('os.path.exists', return_value=True):
+            images.fetch_to_raw(None, 'foo', 'anypath')
+        # Make sure we called info with -f raw for an iso, since qemu-img does
+        # not support iso
+        mock_info.assert_called_once_with('anypath.part', format=None)
+        # Make sure that since we considered this to be a raw file, we did the
+        # just-rename-don't-convert path
+        mock_rename.assert_called_once_with('anypath.part', 'anypath')
+
+    @mock.patch.object(images, 'IMAGE_API')
+    @mock.patch('nova.image.format_inspector.detect_file_format')
+    @mock.patch.object(images, 'qemu_img_info')
+    @mock.patch.object(images, 'fetch')
+    def test_fetch_to_raw_inspector(self, fetch, qemu_img_info, mock_detect,
+                                    mock_glance):
+        # Image claims to be qcow2, is qcow2, but fails safety check, so we
+        # abort before qemu-img-info
+        mock_glance.get.return_value = {'disk_format': 'qcow2'}
+        inspector = mock_detect.return_value
+        inspector.safety_check.return_value = False
+        inspector.__str__.return_value = 'qcow2'
+        self.assertRaises(exception.ImageUnacceptable,
+                          images.fetch_to_raw, None, 'href123', '/no.path')
+        qemu_img_info.assert_not_called()
+        mock_detect.assert_called_once_with('/no.path.part')
+        inspector.safety_check.assert_called_once_with()
+        mock_glance.get.assert_called_once_with(None, 'href123')
+
+        # Image claims to be qcow2, is qcow2, passes safety check, so we make
+        # it all the way to qemu-img-info
+        inspector.safety_check.return_value = True
+        qemu_img_info.side_effect = test.TestingException
+        self.assertRaises(test.TestingException,
+                          images.fetch_to_raw, None, 'href123', '/no.path')
+
+        # Image claims to be qcow2 in glance, but the image is something else,
+        # so we abort before qemu-img-info
+        qemu_img_info.reset_mock()
+        mock_detect.reset_mock()
+        inspector.safety_check.reset_mock()
+        mock_detect.return_value.__str__.return_value = 'vmdk'
+        self.assertRaises(exception.ImageUnacceptable,
+                          images.fetch_to_raw, None, 'href123', '/no.path')
+        mock_detect.assert_called_once_with('/no.path.part')
+        inspector.safety_check.assert_called_once_with()
+        qemu_img_info.assert_not_called()
+
+    @mock.patch.object(images, 'IMAGE_API')
+    @mock.patch('nova.image.format_inspector.detect_file_format')
+    @mock.patch.object(images, 'qemu_img_info')
+    @mock.patch.object(images, 'fetch')
+    def test_fetch_to_raw_inspector_disabled(self, fetch, qemu_img_info,
+                                             mock_gi, mock_glance):
+        self.flags(disable_deep_image_inspection=True,
+                   group='workarounds')
+        qemu_img_info.side_effect = test.TestingException
+        self.assertRaises(test.TestingException,
+                          images.fetch_to_raw, None, 'href123', '/no.path')
+        # If deep inspection is disabled, we should never call the inspector
+        mock_gi.assert_not_called()
+        # ... and we let qemu-img detect the format itself.
+        qemu_img_info.assert_called_once_with('/no.path.part')
+        mock_glance.get.assert_not_called()
+
+    @mock.patch.object(images, 'IMAGE_API')
+    @mock.patch.object(images, 'qemu_img_info')
+    @mock.patch('nova.image.format_inspector.detect_file_format')
+    def test_fetch_inspect_ami(self, detect, imginfo, glance):
+        glance.get.return_value = {'disk_format': 'ami'}
+        detect.return_value.__str__.return_value = 'raw'
+        self.assertRaises(exception.ImageUnacceptable,
+                          images.fetch_to_raw, None, 'href123', '/no.path')
+        # Make sure 'ami was translated into 'raw' before we call qemu-img
+        imginfo.assert_called_once_with('/no.path.part')
+
+    @mock.patch.object(images, 'IMAGE_API')
+    @mock.patch.object(images, 'qemu_img_info')
+    @mock.patch('nova.image.format_inspector.detect_file_format')
+    def test_fetch_inspect_aki(self, detect, imginfo, glance):
+        glance.get.return_value = {'disk_format': 'aki'}
+        detect.return_value.__str__.return_value = 'raw'
+        self.assertRaises(exception.ImageUnacceptable,
+                          images.fetch_to_raw, None, 'href123', '/no.path')
+        # Make sure 'aki was translated into 'raw' before we call qemu-img
+        imginfo.assert_called_once_with('/no.path.part')
+
+    @mock.patch.object(images, 'IMAGE_API')
+    @mock.patch.object(images, 'qemu_img_info')
+    @mock.patch('nova.image.format_inspector.detect_file_format')
+    def test_fetch_inspect_ari(self, detect, imginfo, glance):
+        glance.get.return_value = {'disk_format': 'ari'}
+        detect.return_value.__str__.return_value = 'raw'
+        self.assertRaises(exception.ImageUnacceptable,
+                          images.fetch_to_raw, None, 'href123', '/no.path')
+        # Make sure 'aki was translated into 'raw' before we call qemu-img
+        imginfo.assert_called_once_with('/no.path.part')
+
+    @mock.patch.object(images, 'IMAGE_API')
+    @mock.patch.object(images, 'qemu_img_info')
+    def test_fetch_inspect_unknown_format(self, imginfo, glance):
+        glance.get.return_value = {'disk_format': 'commodore-64-disk'}
+        self.assertRaises(exception.ImageUnacceptable,
+                          images.fetch_to_raw, None, 'href123', '/no.path')
+        # Unsupported formats do not make it past deep inspection
+        imginfo.assert_not_called()
+
+    @mock.patch.object(images, 'IMAGE_API')
+    @mock.patch.object(images, 'qemu_img_info')
+    @mock.patch('nova.image.format_inspector.detect_file_format')
+    def test_fetch_inspect_disagrees_qemu(self, mock_detect, imginfo, glance):
+        glance.get.return_value = {'disk_format': 'qcow2'}
+        mock_detect.return_value.__str__.return_value = 'qcow2'
+        # Glance and inspector think it is a qcow2 file, but qemu-img does not
+        # agree.
+        imginfo.return_value.data_file = None
+        imginfo.return_value.file_format = 'vmdk'
+        ex = self.assertRaises(exception.ImageUnacceptable,
+                               images.fetch_to_raw,
+                               None, 'href123', '/no.path')
+        self.assertIn('content does not match disk_format', str(ex))
+        imginfo.assert_called_once_with('/no.path.part')

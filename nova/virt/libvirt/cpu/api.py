@@ -11,6 +11,7 @@
 #    under the License.
 
 from dataclasses import dataclass
+import typing as ty
 
 from oslo_log import log as logging
 
@@ -59,8 +60,13 @@ class Core:
         return str(self.ident)
 
     @property
-    def governor(self) -> str:
-        return core.get_governor(self.ident)
+    def governor(self) -> ty.Optional[str]:
+        try:
+            return core.get_governor(self.ident)
+        # NOTE(sbauza): cpufreq/scaling_governor is not enabled for some OS
+        # platforms.
+        except exception.FileNotFound:
+            return None
 
     def set_high_governor(self) -> None:
         core.set_governor(self.ident, CONF.libvirt.cpu_power_governor_high)
@@ -69,103 +75,128 @@ class Core:
         core.set_governor(self.ident, CONF.libvirt.cpu_power_governor_low)
 
 
-def power_up(instance: objects.Instance) -> None:
-    if not CONF.libvirt.cpu_power_management:
-        return
-    if instance.numa_topology is None:
-        return
+class API(object):
 
-    cpu_dedicated_set = hardware.get_cpu_dedicated_set_nozero() or set()
-    pcpus = instance.numa_topology.cpu_pinning
-    powered_up = set()
-    for pcpu in pcpus:
-        if pcpu in cpu_dedicated_set:
-            pcpu = Core(pcpu)
-            if CONF.libvirt.cpu_power_management_strategy == 'cpu_state':
-                pcpu.online = True
-            else:
-                pcpu.set_high_governor()
-            powered_up.add(str(pcpu))
-    LOG.debug("Cores powered up : %s", powered_up)
+    def core(self, i):
+        """From a purely functional point of view, there is no need for this
+        method. However, we want to test power management in multinode
+        scenarios (ex: live migration) in our functional tests. If we
+        instantiated the Core class directly in the methods below, the
+        functional tests would not be able to distinguish between cores on the
+        source and destination hosts. In functional tests we can replace this
+        helper method by a stub that returns a fixture, allowing us to maintain
+        distinct core power state for each host.
 
+        See also nova.virt.libvirt.driver.LibvirtDriver.cpu_api.
+        """
+        return Core(i)
 
-def power_down(instance: objects.Instance) -> None:
-    if not CONF.libvirt.cpu_power_management:
-        return
-    if instance.numa_topology is None:
-        return
+    def power_up(self, cpus: ty.Set[int]) -> None:
+        if not CONF.libvirt.cpu_power_management:
+            return
+        cpu_dedicated_set = hardware.get_cpu_dedicated_set_nozero() or set()
+        powered_up = set()
+        for cpu in cpus:
+            if cpu in cpu_dedicated_set:
+                pcpu = self.core(cpu)
+                if CONF.libvirt.cpu_power_management_strategy == 'cpu_state':
+                    pcpu.online = True
+                else:
+                    pcpu.set_high_governor()
+                powered_up.add(str(pcpu))
+        LOG.debug("Cores powered up : %s", powered_up)
 
-    cpu_dedicated_set = hardware.get_cpu_dedicated_set_nozero() or set()
-    pcpus = instance.numa_topology.cpu_pinning
-    powered_down = set()
-    for pcpu in pcpus:
-        if pcpu in cpu_dedicated_set:
-            pcpu = Core(pcpu)
+    def power_up_for_instance(self, instance: objects.Instance) -> None:
+        if instance.numa_topology is None:
+            return
+        pcpus = instance.numa_topology.cpu_pinning.union(
+            instance.numa_topology.cpuset_reserved)
+        self.power_up(pcpus)
+
+    def power_up_for_migration(
+        self, dst_numa_info: objects.LibvirtLiveMigrateNUMAInfo
+    ) -> None:
+        pcpus = set()
+        if 'emulator_pins' in dst_numa_info and dst_numa_info.emulator_pins:
+            pcpus = dst_numa_info.emulator_pins
+        for pins in dst_numa_info.cpu_pins.values():
+            pcpus = pcpus.union(pins)
+        self.power_up(pcpus)
+
+    def _power_down(self, cpus: ty.Set[int]) -> None:
+        if not CONF.libvirt.cpu_power_management:
+            return
+        cpu_dedicated_set = hardware.get_cpu_dedicated_set_nozero() or set()
+        powered_down = set()
+        for cpu in cpus:
+            if cpu in cpu_dedicated_set:
+                pcpu = self.core(cpu)
+                if CONF.libvirt.cpu_power_management_strategy == 'cpu_state':
+                    pcpu.online = False
+                else:
+                    pcpu.set_low_governor()
+                powered_down.add(str(pcpu))
+        LOG.debug("Cores powered down : %s", powered_down)
+
+    def power_down_for_migration(
+        self, dst_numa_info: objects.LibvirtLiveMigrateNUMAInfo
+    ) -> None:
+        pcpus = set()
+        if 'emulator_pins' in dst_numa_info and dst_numa_info.emulator_pins:
+            pcpus = dst_numa_info.emulator_pins
+        for pins in dst_numa_info.cpu_pins.values():
+            pcpus = pcpus.union(pins)
+        self._power_down(pcpus)
+
+    def power_down_for_instance(self, instance: objects.Instance) -> None:
+        if instance.numa_topology is None:
+            return
+        pcpus = instance.numa_topology.cpu_pinning.union(
+            instance.numa_topology.cpuset_reserved)
+        self._power_down(pcpus)
+
+    def power_down_all_dedicated_cpus(self) -> None:
+        if not CONF.libvirt.cpu_power_management:
+            return
+
+        cpu_dedicated_set = hardware.get_cpu_dedicated_set_nozero() or set()
+        for pcpu in cpu_dedicated_set:
+            pcpu = self.core(pcpu)
             if CONF.libvirt.cpu_power_management_strategy == 'cpu_state':
                 pcpu.online = False
             else:
                 pcpu.set_low_governor()
-            powered_down.add(str(pcpu))
-    LOG.debug("Cores powered down : %s", powered_down)
+        LOG.debug("Cores powered down : %s", cpu_dedicated_set)
 
-
-def power_down_all_dedicated_cpus() -> None:
-    if not CONF.libvirt.cpu_power_management:
-        return
-
-    cpu_dedicated_set = hardware.get_cpu_dedicated_set_nozero() or set()
-    for pcpu in cpu_dedicated_set:
-        pcpu = Core(pcpu)
+    def validate_all_dedicated_cpus(self) -> None:
+        if not CONF.libvirt.cpu_power_management:
+            return
+        cpu_dedicated_set = hardware.get_cpu_dedicated_set() or set()
+        pcpus = []
+        for pcpu in cpu_dedicated_set:
+            if (pcpu == 0 and
+                    CONF.libvirt.cpu_power_management_strategy == 'cpu_state'):
+                LOG.warning('CPU0 is in cpu_dedicated_set, '
+                            'but it is not eligible for state management '
+                            'and will be ignored')
+                continue
+            # we need to collect the governors strategy and the CPU states
+            pcpus.append(self.core(pcpu))
         if CONF.libvirt.cpu_power_management_strategy == 'cpu_state':
-            pcpu.online = False
-        else:
-            pcpu.set_low_governor()
-    LOG.debug("Cores powered down : %s", cpu_dedicated_set)
-
-
-def validate_all_dedicated_cpus() -> None:
-    if not CONF.libvirt.cpu_power_management:
-        return
-    cpu_dedicated_set = hardware.get_cpu_dedicated_set() or set()
-    governors = set()
-    cpu_states = set()
-    for pcpu in cpu_dedicated_set:
-        if (pcpu == 0 and
-                CONF.libvirt.cpu_power_management_strategy == 'cpu_state'):
-            LOG.warning('CPU0 is in cpu_dedicated_set, but it is not eligible '
-                        'for state management and will be ignored')
-            continue
-        pcpu = Core(pcpu)
-        # we need to collect the governors strategy and the CPU states
-        try:
-            governors.add(pcpu.governor)
-        except FileNotFoundError as e:
-            # NOTE(gibi): When
-            # /sys/devices/system/cpu/cpuX/cpufreq/scaling_governor does
-            # not exist it means the host OS does not support any governors.
-            # If cpu_state strategy is requested we can ignore this as
-            # governors will not be used but if governor strategy is requested
-            # we need to report an error and stop as the host is not properly
-            # configured
-            if CONF.libvirt.cpu_power_management_strategy == 'governor':
-                msg = _(
-                    "[libvirt]cpu_power_management_strategy is 'governor', "
-                    "but the host OS does not support governors for CPU%d"
-                    % pcpu.ident
-                )
-                raise exception.InvalidConfiguration(msg) from e
-
-        cpu_states.add(pcpu.online)
-    if CONF.libvirt.cpu_power_management_strategy == 'cpu_state':
-        # all the cores need to have the same governor strategy
-        if len(governors) > 1:
-            msg = _("All the cores need to have the same governor strategy"
-                    "before modifying the CPU states. You can reboot the "
-                    "compute node if you prefer.")
-            raise exception.InvalidConfiguration(msg)
-    elif CONF.libvirt.cpu_power_management_strategy == 'governor':
-        # all the cores need to be online
-        if False in cpu_states:
-            msg = _("All the cores need to be online before modifying the "
-                    "governor strategy.")
-            raise exception.InvalidConfiguration(msg)
+            # NOTE(sbauza): offline cores can't have a governor, it returns a
+            # DeviceBusy exception.
+            governors = set([pcpu.governor for pcpu in pcpus
+                             if pcpu.online])
+            # all the cores need to have the same governor strategy
+            if len(governors) > 1:
+                msg = _("All the cores need to have the same governor strategy"
+                        "before modifying the CPU states. You can reboot the "
+                        "compute node if you prefer.")
+                raise exception.InvalidConfiguration(msg)
+        elif CONF.libvirt.cpu_power_management_strategy == 'governor':
+            cpu_states = set([pcpu.online for pcpu in pcpus])
+            # all the cores need to be online
+            if False in cpu_states:
+                msg = _("All the cores need to be online before modifying the "
+                        "governor strategy.")
+                raise exception.InvalidConfiguration(msg)
