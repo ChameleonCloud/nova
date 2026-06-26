@@ -481,16 +481,11 @@ class ComputeNodeList(base.ObjectListBase, base.NovaObject):
         return db.compute_node_get_all_by_host(context, host)
 
     @base.remotable_classmethod
-    def get_all_by_host(cls, context, host, use_slave=False, try_node_name=False):
-        try:
-            db_computes = cls._db_compute_node_get_all_by_host(
-                context, host, use_slave=use_slave)
-            return base.obj_make_list(context, cls(context), objects.ComputeNode,
-                                      db_computes)
-        except exception.ComputeHostNotFound:
-            if try_node_name:
-                return [objects.ComputeNode.get_by_nodename(context, host)]
-            raise
+    def get_all_by_host(cls, context, host, use_slave=False):
+        db_computes = cls._db_compute_node_get_all_by_host(context, host,
+                                                      use_slave=use_slave)
+        return base.obj_make_list(context, cls(context), objects.ComputeNode,
+                                  db_computes)
 
     @staticmethod
     @db.select_db_reader_mode

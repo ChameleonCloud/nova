@@ -6720,8 +6720,10 @@ class AggregateAPI:
         # support for this now, but Blazar will still place hosts in Nova aggregates;
         # once Blazar is adapted to, e.g., integrate against Placement directly,
         # we can revert this, and the other Nova patches, like get_by_host_or_node_name.
-        nodes = objects.ComputeNodeList.get_all_by_host(
-            context, host_name, try_node_name=True)
+        try:
+            nodes = objects.ComputeNodeList.get_all_by_host(context, host_name)
+        except exception.ComputeHostNotFound:
+            nodes = [objects.ComputeNode.get_by_nodename(context, host_name)]
         node_name = nodes[0].hypervisor_hostname
         try:
             self.placement_client.aggregate_add_host(
@@ -6781,8 +6783,10 @@ class AggregateAPI:
         # support for this now, but Blazar will still place hosts in Nova aggregates;
         # once Blazar is adapted to, e.g., integrate against Placement directly,
         # we can revert this, and the other Nova patches, like get_by_host_or_node_name.
-        nodes = objects.ComputeNodeList.get_all_by_host(
-            context, host_name, try_node_name=True)
+        try:
+            nodes = objects.ComputeNodeList.get_all_by_host(context, host_name)
+        except exception.ComputeHostNotFound:
+            nodes = [objects.ComputeNode.get_by_nodename(context, host_name)]
         node_name = nodes[0].hypervisor_hostname
         try:
             # Anything else this raises is handled in the route handler as
