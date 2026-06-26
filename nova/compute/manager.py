@@ -2851,16 +2851,13 @@ class ComputeManager(manager.Manager):
             self._build_resources_cleanup(instance, network_info)
             raise exception.BuildAbortException(instance_uuid=instance.uuid,
                     reason=e.format_message())
-        except Exception as e:
+        except Exception:
             LOG.exception('Failure prepping block device',
                           instance=instance)
-            # Make sure the async call finishes
-            if network_info is not None:
-                network_info.wait(do_raise=False)
-                self.driver.clean_networks_preparation(instance, network_info)
-            self.driver.failed_spawn_cleanup(instance)
             self._build_resources_cleanup(instance, network_info)
-            raise exception.BuildAbortException('Failure prepping block device. ' + str(e))
+            msg = _('Failure prepping block device.')
+            raise exception.BuildAbortException(instance_uuid=instance.uuid,
+                    reason=msg)
 
         resources['accel_info'] = list(spec_arqs.values())
         try:
