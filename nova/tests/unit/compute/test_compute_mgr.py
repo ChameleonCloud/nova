@@ -7145,7 +7145,8 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
                 [self.instance], self.image, self.filter_properties,
                 self.admin_pass, self.injected_files, self.requested_networks,
                 self.security_groups, self.block_device_mapping,
-                request_spec={}, host_lists=[fake_host_list])
+                request_spec={}, host_lists=[fake_host_list],
+                last_seen_error_message='')
         mock_failed.assert_called_once_with(self.node)
 
     @mock.patch.object(manager.ComputeManager, '_shutdown_instance')
@@ -7232,7 +7233,8 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
             [instance], self.image, self.filter_properties,
             self.admin_pass, self.injected_files, self.requested_networks,
             self.security_groups, self.block_device_mapping,
-            request_spec={}, host_lists=[fake_host_list])
+            request_spec={}, host_lists=[fake_host_list],
+            last_seen_error_message='')
 
     @mock.patch.object(manager.ComputeManager, '_build_and_run_instance')
     @mock.patch.object(manager.ComputeManager, '_cleanup_allocated_networks')
@@ -7279,7 +7281,8 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
             [instance], self.image, self.filter_properties,
             self.admin_pass, self.injected_files, self.requested_networks,
             self.security_groups, self.block_device_mapping,
-            request_spec={}, host_lists=[fake_host_list])
+            request_spec={}, host_lists=[fake_host_list],
+            last_seen_error_message='')
 
     @mock.patch.object(manager.ComputeManager, '_build_and_run_instance')
     @mock.patch.object(conductor_api.ComputeTaskAPI, 'build_instances')
@@ -7334,7 +7337,8 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
             [instance], self.image, self.filter_properties,
             self.admin_pass, self.injected_files, self.requested_networks,
             self.security_groups, self.block_device_mapping,
-            request_spec={}, host_lists=[fake_host_list])
+            request_spec={}, host_lists=[fake_host_list],
+            last_seen_error_message='')
 
     @mock.patch.object(objects.InstanceActionEvent,
                        'event_finish_with_failure')
@@ -7443,7 +7447,8 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
                 [self.instance], self.image, self.filter_properties,
                 self.admin_pass, self.injected_files, self.requested_networks,
                 self.security_groups, self.block_device_mapping,
-                request_spec={}, host_lists=[fake_host_list])
+                request_spec={}, host_lists=[fake_host_list],
+                last_seen_error_message='')
 
     @mock.patch.object(objects.InstanceActionEvent,
                        'event_finish_with_failure')
@@ -7498,7 +7503,8 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
                 [self.instance], self.image, self.filter_properties,
                 self.admin_pass, self.injected_files, self.requested_networks,
                 self.security_groups, self.block_device_mapping,
-                request_spec={}, host_lists=[fake_host_list])
+                request_spec={}, host_lists=[fake_host_list],
+                last_seen_error_message='')
 
     @mock.patch('nova.compute.resource_tracker.ResourceTracker.instance_claim',
                 new=mock.MagicMock())
@@ -7564,7 +7570,9 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
                 [self.instance], self.image, self.filter_properties,
                 self.admin_pass, self.injected_files, self.requested_networks,
                 self.security_groups, self.block_device_mapping,
-                request_spec={}, host_lists=[fake_host_list])
+                request_spec={}, host_lists=[fake_host_list],
+                last_seen_error_message=(
+                    'Affinity instance group policy was violated'))
 
     @mock.patch('nova.compute.resource_tracker.ResourceTracker.instance_claim',
                 new=mock.MagicMock())
@@ -8044,7 +8052,10 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
                 self.image, self.filter_properties, self.admin_pass,
                 self.injected_files, self.requested_networks,
                 self.security_groups, self.block_device_mapping,
-                request_spec={}, host_lists=[fake_host_list])
+                request_spec={}, host_lists=[fake_host_list],
+                last_seen_error_message=(
+                    'Insufficient compute resources: '
+                    'resource unavailable.'))
         mock_nil.assert_called_once_with(self.instance)
 
     @mock.patch.object(manager.ComputeManager, '_build_resources')

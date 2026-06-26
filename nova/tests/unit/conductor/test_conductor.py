@@ -4722,7 +4722,8 @@ class ConductorTaskRPCAPITestCase(_BaseTaskTestCase,
                   'injected_files': mock.sentinel.injected_files,
                   'requested_networks': mock.sentinel.requested_networks,
                   'security_groups': mock.sentinel.security_groups,
-                  'request_spec': mock.sentinel.request_spec}
+                  'request_spec': mock.sentinel.request_spec,
+                  'last_seen_error_message': None}
             cctxt_mock.cast.assert_called_once_with(
                 self.context, 'build_instances', **kw)
         _test()
@@ -4752,7 +4753,8 @@ class ConductorTaskRPCAPITestCase(_BaseTaskTestCase,
                   'admin_password': mock.sentinel.admin_password,
                   'injected_files': mock.sentinel.injected_files,
                   'requested_networks': mock.sentinel.requested_networks,
-                  'security_groups': mock.sentinel.security_groups}
+                  'security_groups': mock.sentinel.security_groups,
+                  'last_seen_error_message': None}
             cctxt_mock.cast.assert_called_once_with(
                 self.context, 'build_instances', **kw)
         _test()
