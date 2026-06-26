@@ -486,7 +486,9 @@ class HypervisorsController(wsgi.Controller):
             try:
                 instances = self.host_api.instance_get_all_by_host(context,
                     compute_node.host)
-                instances = [ i for i in instances if i.node == id ]
+                instances = [
+                    i for i in instances
+                    if i.node == compute_node.hypervisor_hostname]
             except exception.HostMappingNotFound as e:
                 raise webob.exc.HTTPNotFound(explanation=e.format_message())
 

@@ -106,10 +106,14 @@ TEST_HYPERS_OBJ = [objects.ComputeNode(**hyper_dct)
 TEST_HYPERS[0].update({'service': TEST_SERVICES[0]})
 TEST_HYPERS[1].update({'service': TEST_SERVICES[1]})
 
-TEST_SERVERS = [dict(name="inst1", uuid=uuids.instance_1, host="compute1"),
-                dict(name="inst2", uuid=uuids.instance_2, host="compute2"),
-                dict(name="inst3", uuid=uuids.instance_3, host="compute1"),
-                dict(name="inst4", uuid=uuids.instance_4, host="compute2")]
+TEST_SERVERS = [dict(name="inst1", uuid=uuids.instance_1, host="compute1",
+                     node="hyper1"),
+                dict(name="inst2", uuid=uuids.instance_2, host="compute2",
+                     node="hyper2"),
+                dict(name="inst3", uuid=uuids.instance_3, host="compute1",
+                     node="hyper1"),
+                dict(name="inst4", uuid=uuids.instance_4, host="compute2",
+                     node="hyper2")]
 
 
 def fake_compute_node_get_all(context, limit=None, marker=None):
