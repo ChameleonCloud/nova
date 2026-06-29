@@ -642,7 +642,7 @@ class ComputeTaskManager:
     def build_instances(self, context, instances, image, filter_properties,
             admin_password, injected_files, requested_networks,
             security_groups, block_device_mapping=None, legacy_bdm=True,
-            request_spec=None, host_lists=None, last_seen_error_message=None):
+            request_spec=None, host_lists=None):
         # TODO(ndipanov): Remove block_device_mapping and legacy_bdm in version
         #                 2.0 of the RPC API.
         # TODO(danms): Remove this in version 2.0 of the RPC API
@@ -681,6 +681,7 @@ class ComputeTaskManager:
         # lists may be empty if there are no more hosts left in a rescheduling
         # situation.
         is_reschedule = host_lists is not None
+        last_exc_reason = filter_properties.get('retry', {}).get('exc_reason')
         try:
             # check retry policy. Rather ugly use of instances[0]...
             # but if we've exceeded max retries... then we really only
@@ -702,8 +703,9 @@ class ComputeTaskManager:
                     msg = ("Exhausted all hosts available for retrying build "
                            "failures for instance %(instance_uuid)s." %
                            {"instance_uuid": instances[0].uuid})
-                    if last_seen_error_message:
-                        msg = last_seen_error_message
+                    if last_exc_reason:
+                        msg += _(" Last exception: %(exc_reason)s") % {
+                            "exc_reason": last_exc_reason}
                     raise exception.MaxRetriesExceeded(reason=msg)
             else:
                 # This is not a reschedule, so we need to call the scheduler to
@@ -793,6 +795,9 @@ class ComputeTaskManager:
                     msg = ("Exhausted all hosts available for retrying build "
                            "failures for instance %(instance_uuid)s." %
                            {"instance_uuid": instance.uuid})
+                    if last_exc_reason:
+                        msg += _(" Last exception: %(exc_reason)s") % {
+                            "exc_reason": last_exc_reason}
                     exc = exception.MaxRetriesExceeded(reason=msg)
                     self._cleanup_when_reschedule_fails(
                         context, instance, exc, legacy_request_spec,
