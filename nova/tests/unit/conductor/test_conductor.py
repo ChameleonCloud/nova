@@ -831,10 +831,16 @@ class _BaseTaskTestCase(object):
         # build_instances() is a cast, we need to wait for it to complete
         self.useFixture(fixtures.CastAsCallFixture(self))
 
+        filter_properties = {}
+        # default set by populate_retry
+        filter_properties["retry"] = {"num_attempts": 0, "hosts": []}
+        # inject exc reason
+        filter_properties["retry"]["exc_reason"] = "fake_exc_reason"
+
         self.conductor.build_instances(
             context=self.context,
             instances=[instance], image=image,
-            filter_properties={},
+            filter_properties=filter_properties,
             admin_password='admin_password',
             injected_files='injected_files',
             requested_networks=None,
@@ -850,6 +856,56 @@ class _BaseTaskTestCase(object):
             self.context, 'build_instances',
             instance.uuid, test.MatchType(dict), 'error',
             test.MatchType(exc.MaxRetriesExceeded))
+
+        # exception is 5th positional arg in notify_about_compute_task_error
+        raised = mock_notify.call_args[0][5]
+        self.assertIn('Exhausted all hosts', str(raised))
+        self.assertIn('Last exception: fake_exc_reason', str(raised))
+
+    @mock.patch.object(conductor_manager.ComputeTaskManager,
+            '_destroy_build_request')
+    @mock.patch('nova.compute.utils.notify_about_compute_task_error')
+    @mock.patch.object(objects.Instance, 'save')
+    def test_build_instances_empty_host_list(self, _mock_save, mock_notify,
+                _mock_destroy):
+        # A list of three alternate hosts for one instance
+        instance = fake_instance.fake_instance_obj(
+            self.context, expected_attrs='system_metadata')
+        image = {'fake-data': 'should_pass_silently'}
+
+        # build_instances() is a cast, we need to wait for it to complete
+        self.useFixture(fixtures.CastAsCallFixture(self))
+
+        filter_properties = {}
+        # default set by populate_retry
+        filter_properties["retry"] = {"num_attempts": 0, "hosts": []}
+        # inject exc reason
+        filter_properties["retry"]["exc_reason"] = "fake_exc_reason"
+
+        self.conductor.build_instances(
+            context=self.context,
+            instances=[instance], image=image,
+            filter_properties=filter_properties,
+            admin_password='admin_password',
+            injected_files='injected_files',
+            requested_networks=None,
+            security_groups='security_groups',
+            block_device_mapping=None,
+            legacy_bdm=None,
+            host_lists=[[]]
+        )
+
+        # Since claim_resources() is mocked to always return False, we will run
+        # out of alternate hosts, and complain about MaxRetriesExceeded.
+        mock_notify.assert_called_once_with(
+            self.context, 'build_instances',
+            instance.uuid, test.MatchType(dict), 'error',
+            test.MatchType(exc.MaxRetriesExceeded))
+
+        # exception is positional arg 5 in notify_about_compute_task_error
+        raised = mock_notify.call_args[0][5]
+        self.assertIn('Exhausted all hosts', str(raised))
+        self.assertIn('Last exception: fake_exc_reason', str(raised))
 
     @mock.patch.object(conductor_manager.ComputeTaskManager,
             '_destroy_build_request')
