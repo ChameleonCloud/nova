@@ -642,7 +642,7 @@ class ComputeTaskManager:
     def build_instances(self, context, instances, image, filter_properties,
             admin_password, injected_files, requested_networks,
             security_groups, block_device_mapping=None, legacy_bdm=True,
-            request_spec=None, host_lists=None, last_seen_error_message=None):
+            request_spec=None, host_lists=None):
         # TODO(ndipanov): Remove block_device_mapping and legacy_bdm in version
         #                 2.0 of the RPC API.
         # TODO(danms): Remove this in version 2.0 of the RPC API
@@ -702,8 +702,6 @@ class ComputeTaskManager:
                     msg = ("Exhausted all hosts available for retrying build "
                            "failures for instance %(instance_uuid)s." %
                            {"instance_uuid": instances[0].uuid})
-                    if last_seen_error_message:
-                        msg = last_seen_error_message
                     raise exception.MaxRetriesExceeded(reason=msg)
             else:
                 # This is not a reschedule, so we need to call the scheduler to

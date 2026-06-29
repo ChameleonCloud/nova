@@ -495,7 +495,7 @@ class SchedulerManager(manager.Manager):
             'There are %(hosts)d hosts available but '
             '%(required_count)d instances requested to build.',
             {'hosts': len(hosts), 'required_count': required_count})
-        reason = _('There are not enough hosts available. To troubleshoot, please see bit.ly/faq-instance-failure')
+        reason = _('There are not enough hosts available.')
         raise exception.NoValidHost(reason=reason)
 
     def _cleanup_allocations(self, context, instance_uuids):

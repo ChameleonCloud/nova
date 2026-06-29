@@ -2471,7 +2471,7 @@ class ComputeManager(manager.Manager):
                     image, filter_properties, admin_password,
                     injected_files, requested_networks, security_groups,
                     block_device_mapping, request_spec=request_spec,
-                    host_lists=[host_list], last_seen_error_message=e.kwargs['reason'])
+                    host_lists=[host_list])
 
             if isinstance(e, exception.RescheduledByPolicyException):
                 return build_results.RESCHEDULED_BY_POLICY
@@ -2851,16 +2851,13 @@ class ComputeManager(manager.Manager):
             self._build_resources_cleanup(instance, network_info)
             raise exception.BuildAbortException(instance_uuid=instance.uuid,
                     reason=e.format_message())
-        except Exception as e:
+        except Exception:
             LOG.exception('Failure prepping block device',
                           instance=instance)
-            # Make sure the async call finishes
-            if network_info is not None:
-                network_info.wait(do_raise=False)
-                self.driver.clean_networks_preparation(instance, network_info)
-            self.driver.failed_spawn_cleanup(instance)
             self._build_resources_cleanup(instance, network_info)
-            raise exception.BuildAbortException('Failure prepping block device. ' + str(e))
+            msg = _('Failure prepping block device.')
+            raise exception.BuildAbortException(instance_uuid=instance.uuid,
+                    reason=msg)
 
         resources['accel_info'] = list(spec_arqs.values())
         try:
