@@ -1906,6 +1906,9 @@ class IronicDriver(virt_driver.ComputeDriver):
                 # "disabled" state and cause any new connection
                 # will be refused.
                 console = _enable_console(True)
+        else:
+            # console enable may have failed and been left disabled
+            console = _enable_console(True)
 
         if console['console_enabled']:
             return {'node': node,
