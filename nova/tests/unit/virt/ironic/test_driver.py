@@ -3397,23 +3397,40 @@ class IronicDriverConsoleTestCase(test.NoDBTestCase):
         self.assertThat(result['console_info'],
                         nova_matchers.DictMatches(expected))
 
-    @mock.patch.object(ironic_driver, 'LOG', autospec=True)
-    def test__get_node_console_with_reset_console_disabled(self, mock_log):
-        def _fake_log_debug(msg, *args, **kwargs):
-            regex = r'Console is disabled for instance .*'
-            self.assertThat(msg, matchers.MatchesRegex(regex))
+    def test__get_node_console_with_reset_recovers_disabled_console(self):
+        temp_data = {'enabled': False}
 
+        def _fake_get_console(node_uuid):
+            return self._create_console_data(enabled=temp_data['enabled'])
+
+        def _fake_enable_console(node_uuid):
+            temp_data['enabled'] = True
+
+        self.mock_conn.get_node_console.side_effect = _fake_get_console
+        self.mock_conn.enable_node_console.side_effect = _fake_enable_console
+
+        expected = self._create_console_data()['console_info']
+
+        result = self.driver._get_node_console_with_reset(self.instance)
+
+        self.assertEqual(1, self.mock_conn.enable_node_console.call_count)
+        self.mock_conn.disable_node_console.assert_not_called()
+        self.assertEqual(self.node.id, result['node'].id)
+        self.assertThat(result['console_info'],
+                        nova_matchers.DictMatches(expected))
+
+    def test__get_node_console_with_reset_propagates_exception(self):
         self.mock_conn.get_node_console.return_value = \
             self._create_console_data(enabled=False)
-        mock_log.debug.side_effect = _fake_log_debug
+        self.mock_conn.enable_node_console.side_effect = \
+            sdk_exc.SDKException()
 
         self.assertRaises(exception.ConsoleNotAvailable,
                           self.driver._get_node_console_with_reset,
                           self.instance)
 
-        self.mock_conn.get_node_console.assert_called_once_with(self.node.id)
-        self.mock_conn.enable_node_console.assert_not_called()
-        self.assertTrue(mock_log.debug.called)
+        self.assertEqual(1, self.mock_conn.enable_node_console.call_count)
+        self.mock_conn.disable_node_console.assert_not_called()
 
     @mock.patch.object(ironic_driver, 'LOG', autospec=True)
     def test__get_node_console_with_reset_set_mode_failed(self, mock_log):
@@ -3527,14 +3544,27 @@ class IronicDriverConsoleTestCase(test.NoDBTestCase):
         self.assertEqual(10000, result.port)
 
     def test_get_serial_console_socat_disabled(self):
-        self.mock_conn.get_node_console.return_value = \
-            self._create_console_data(enabled=False)
+        # A node left with console_enabled False by an interrupted reset is
+        # recovered on the next request rather than reported unavailable.
+        temp_data = {'enabled': False}
 
-        self.assertRaises(exception.ConsoleTypeUnavailable,
-                          self.driver.get_serial_console,
-                          self.ctx, self.instance)
-        self.mock_conn.get_node_console.assert_called_once_with(self.node.id)
-        self.mock_conn.enable_node_console.assert_not_called()
+        def _fake_get_console(node_uuid):
+            return self._create_console_data(enabled=temp_data['enabled'])
+
+        def _fake_enable_console(node_uuid):
+            temp_data['enabled'] = True
+
+        self.mock_conn.get_node_console.side_effect = _fake_get_console
+        self.mock_conn.enable_node_console.side_effect = \
+            _fake_enable_console
+
+        result = self.driver.get_serial_console(self.ctx, self.instance)
+
+        self.assertEqual(1, self.mock_conn.enable_node_console.call_count)
+        self.mock_conn.disable_node_console.assert_not_called()
+        self.assertIsInstance(result, console_type.ConsoleSerial)
+        self.assertEqual('127.0.0.1', result.host)
+        self.assertEqual(10000, result.port)
 
     @mock.patch.object(ironic_driver, 'LOG', autospec=True)
     def test_get_serial_console_socat_invalid_url(self, mock_log):
