@@ -761,3 +761,51 @@ class TestRequestFilter(test.NoDBTestCase):
             self.context,
             reqspec,
         )
+
+    @mock.patch("nova.objects.AggregateList.get_by_metadata_key")
+    def test_blazar_reservation_filter_not_required(self, getmdkey):
+        # blazar_reservation_required=False permits unreserved instances, but
+        # they must still be kept off blazar managed hosts. Host reservations
+        # are enforced only by aggregate membership, so without this the
+        # request can land on a host inside an active lease.
+        self.flags(use_blazar_reservation_prefilter=True, group="scheduler")
+        self.flags(blazar_reservation_required=False, group="scheduler")
+        getmdkey.return_value = [objects.Aggregate(uuid=uuids.agg1)]
+        reqspec = objects.RequestSpec(
+            instance_uuid=uuids.instance,
+            project_id=uuids.project,
+            scheduler_hints={},
+            flavor=objects.Flavor(extra_specs={}),
+        )
+        request_filter.blazar_reservation_filter(self.context, reqspec)
+        self.assertEqual(
+            {uuids.agg1},
+            reqspec.requested_destination.forbidden_aggregates,
+        )
+
+    @mock.patch("nova.objects.AggregateList.get_by_metadata")
+    def test_blazar_reservation_filter_host_reservation(self, getmd):
+        # A host reservation still restricts placement to its own aggregate,
+        # and must not be forbidden by the guard above.
+        self.flags(use_blazar_reservation_prefilter=True, group="scheduler")
+        self.flags(blazar_reservation_required=False, group="scheduler")
+        getmd.return_value = [objects.Aggregate(uuid=uuids.agg1, name="r-1")]
+        reqspec = objects.RequestSpec(
+            instance_uuid=uuids.instance,
+            project_id=uuids.project,
+            scheduler_hints={"reservation": ["r-1"]},
+            flavor=objects.Flavor(extra_specs={}),
+        )
+        self.assertTrue(
+            request_filter.blazar_reservation_filter(self.context, reqspec)
+        )
+        self.assertEqual(
+            [uuids.agg1],
+            reqspec.requested_destination.aggregates[0].split(","),
+        )
+        # The aggregate we require must not also be forbidden
+        self.assertIsNone(reqspec.requested_destination.forbidden_aggregates)
+        # Ownership is checked against the request spec project, not the context
+        getmd.assert_called_once_with(
+            self.context, key="blazar:owner", value=uuids.project
+        )

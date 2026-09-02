@@ -136,6 +136,7 @@ def require_tenant_aggregate(ctxt, request_spec):
 
 # Blazar adds this to reserved flavors to identify them.
 BLAZAR_FLAVOR_EXTRA_SPEC = 'aggregate_instance_extra_specs:reservation'
+BLAZAR_OWNER_KEY = 'blazar:owner'
 
 
 def _is_flavor_reservation(request_spec):
@@ -143,6 +144,35 @@ def _is_flavor_reservation(request_spec):
     extra_specs = request_spec.flavor.get("extra_specs") or {}
     return BLAZAR_FLAVOR_EXTRA_SPEC in extra_specs
 
+def _get_or_create_destination(request_spec):
+    if (
+        "requested_destination" not in request_spec
+        or request_spec.requested_destination is None
+    ):
+        request_spec.requested_destination = objects.Destination()
+    return request_spec.requested_destination
+
+def _blazar_aggregates(ctxt):
+    """Return every aggregate managed by Blazar."""
+    freepool = CONF.scheduler.blazar_freepool_aggregate_name
+    blazar_aggs = objects.AggregateList.get_by_metadata_key(ctxt, key=BLAZAR_OWNER_KEY)
+    return [agg for agg in ]
+
+
+
+
+def _forbid_blazar_aggregates(ctxt, request_spec):
+    """Keep an unreserved request off every blazar managed host."""
+
+    # Get list of all blazar owned aggregates
+    aggregates = 
+    if not aggregates:
+        return False
+
+
+    destination = _get_or_create_destination(request_spec)
+    destination.append_forbidden_aggregates({agg.uuid for agg in aggregates})
+    return True
 
 @trace_request_filter
 def blazar_reservation_filter(ctxt, request_spec):
@@ -162,27 +192,23 @@ def blazar_reservation_filter(ctxt, request_spec):
     # allow setting reservation hint as mandatory
     reservation_required = CONF.scheduler.blazar_reservation_required
     reservation_hints = request_spec.scheduler_hints.get('reservation', None)
+    is_flavor_reservation = _is_flavor_reservation(request_spec)
 
-    # handle missing reservation hint
-    if not reservation_hints:
-        if _is_flavor_reservation(request_spec):
-            LOG.debug('blazar_reservation_filter: instance %s has a '
-                      'flavor-based reservation', request_spec.instance_uuid)
-            return False
-        no_reservation_hint_msg = f"Can't schedule instance {request_spec.instance_uuid}. No reservation hint was specified."
+    # Not a blazar reservation
+    if not reservation_hints and not is_flavor_reservation:
+        msg = f"Can't schedule instance {request_spec.instance_uuid}. No reservation was specified."
         if reservation_required:
-            LOG.warning(no_reservation_hint_msg)
-            raise exception.RequestFilterFailed(reason=_(no_reservation_hint_msg))
-        else:
-            LOG.info(no_reservation_hint_msg)
-            # if no reservation hint, we'll skip the rest of this prefilter
-            return False
+            LOG.warning(msg)
+            raise exception.RequestFilterFailed(reason=_(msg))
 
-    # after this point, assume we have a reservation hint. we don't check for
-    # "reservation required" any longer. At this point, you requested a reservation,
-    # and none matched, so 0 is the expected result. If you didn't want one,
-    # you shouldn't have asked for one!
+        LOG.info(msg)
+        return _forbid_blazar_aggregates(ctxt, request_spec)
 
+    # Flavor reservations are handled by placement instead
+    if is_flavor_reservation:
+        LOG.debug('blazar_reservation_filter: instance %s has a '
+                    'flavor-based reservation', request_spec.instance_uuid)
+        return False
 
     # handle possibility of multiple reservation hints, or malformed requests by
     # not asking DB directly for the name, instead get list that project "could" use.
