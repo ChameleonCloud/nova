@@ -724,3 +724,40 @@ class TestRequestFilter(test.NoDBTestCase):
              ot.COMPUTE_EPHEMERAL_ENCRYPTION_LUKS},
             reqspec.root_required)
         self.assertEqual(set(), reqspec.root_forbidden)
+
+    def test_blazar_reservation_filter_flavor_reservation(self):
+        self.flags(use_blazar_reservation_prefilter=True, group="scheduler")
+        self.flags(blazar_reservation_required=True, group="scheduler")
+        reqspec = objects.RequestSpec(
+            instance_uuid=uuids.instance,
+            scheduler_hints={},
+            flavor=objects.Flavor(
+                extra_specs={
+                    "aggregate_instance_extra_specs:reservation": "r-1"
+                }
+            ),
+        )
+        # Flavor reservations are enforced by placement. The blazar prefilter 
+        # should return False so that they pass through.
+        self.assertFalse(
+            request_filter.blazar_reservation_filter(self.context, reqspec)
+        )
+        # Prefilter did not add a `member_of` constraint
+        self.assertNotIn("requested_destination", reqspec)
+
+    def test_blazar_reservation_filter_required(self):
+        # if blazar_reservation_required=True, a scheduling request
+        # with no reservation hint or reserved flavor should not schedule
+        self.flags(use_blazar_reservation_prefilter=True, group="scheduler")
+        self.flags(blazar_reservation_required=True, group="scheduler")
+        reqspec = objects.RequestSpec(
+            instance_uuid=uuids.instance,
+            scheduler_hints={},
+            flavor=objects.Flavor(extra_specs={}),
+        )
+        self.assertRaises(
+            exception.RequestFilterFailed,
+            request_filter.blazar_reservation_filter,
+            self.context,
+            reqspec,
+        )
