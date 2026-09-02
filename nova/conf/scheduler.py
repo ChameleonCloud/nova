@@ -188,7 +188,7 @@ Possible values:
     ),
     cfg.BoolOpt("blazar_reservation_required",
         default=False,
-        help="If true, a reservation hunt must be present on all requests"
+        help=("If true, a blazar reservation must be present on all requests")
     ),
     cfg.BoolOpt("image_metadata_prefilter",
         default=False,

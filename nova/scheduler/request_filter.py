@@ -133,20 +133,25 @@ def require_tenant_aggregate(ctxt, request_spec):
 
     return True
 
+
+# Blazar adds this to reserved flavors to identify them.
+BLAZAR_FLAVOR_EXTRA_SPEC = 'aggregate_instance_extra_specs:reservation'
+
+
+def _is_flavor_reservation(request_spec):
+    """Whether this request's flavor is from a Blazar Flavor Reservation."""
+    extra_specs = request_spec.flavor.get("extra_specs") or {}
+    return BLAZAR_FLAVOR_EXTRA_SPEC in extra_specs
+
+
 @trace_request_filter
 def blazar_reservation_filter(ctxt, request_spec):
-    """Require hosts to be in an aggregate corresponding to a blazar reservation.
-    The reservation_id must be passed in as a scheduler hint, with key `reservation`
+    """Restrict placement to the hosts of the request's blazar reservation.
 
-    Additionally, the user must have permission to use the corresponding reservation.
-    For now, this is enforced by checking that the value 'blazar:owner' on the aggregate
-    matches the requesting project_id.
-
-    if reservation_required is set to true, any scheduling requests without a reservation
-    hint will be rejected.
-
-    In terms of behavior, this is just a combination of the map_az_to_placement_aggregate
-    and require_tenant_aggregate filters, with different key names.
+    Host reservations name it in the `reservation` scheduler hint, matched
+    against an aggregate whose `blazar:owner` is the project. Flavor
+    reservations declare it in the flavor and need no constraint here: the
+    flavor's own `resources:CUSTOM_RESERVATION_<id>` request pins placement.
     """
 
     # skip the filter if not enabled
@@ -160,6 +165,10 @@ def blazar_reservation_filter(ctxt, request_spec):
 
     # handle missing reservation hint
     if not reservation_hints:
+        if _is_flavor_reservation(request_spec):
+            LOG.debug('blazar_reservation_filter: instance %s has a '
+                      'flavor-based reservation', request_spec.instance_uuid)
+            return False
         no_reservation_hint_msg = f"Can't schedule instance {request_spec.instance_uuid}. No reservation hint was specified."
         if reservation_required:
             LOG.warning(no_reservation_hint_msg)
