@@ -17,6 +17,7 @@ from .cyborg import CyborgFixture  # noqa: F401, H304
 from .filesystem import SysFileSystemFixture  # noqa: F401, H304
 from .filesystem import TempFileSystemFixture  # noqa: F401, H304
 from .glance import GlanceFixture  # noqa: F401, H304
+from .ironic import IronicFixture  # noqa: F401, H304
 from .libvirt import LibvirtFixture  # noqa: F401, H304
 from .libvirt_imagebackend import \
     LibvirtImageBackendFixture  # noqa: F401, H304
