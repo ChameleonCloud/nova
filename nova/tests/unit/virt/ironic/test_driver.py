@@ -32,6 +32,7 @@ from tooz import hashring as hash_ring
 from nova.api.metadata import base as instance_metadata
 from nova.api.openstack import common
 from nova import block_device
+from nova.compute import manager as compute_manager
 from nova.compute import power_state as nova_states
 from nova.compute import provider_tree
 from nova.compute import task_states
@@ -3510,6 +3511,85 @@ class NodeCacheTestCase(test.NoDBTestCase):
 
         expected_cache = {n.id: n for n in nodes[1:]}
         self.assertEqual(expected_cache, self.driver.node_cache)
+
+
+class LocalDeleteTestCase(test.TestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.host = 'host1'
+        self.flags(host=self.host, running_deleted_instance_action='reap')
+        self.ctx = nova_context.get_admin_context()
+
+        self.compute = compute_manager.ComputeManager(
+            compute_driver='ironic.IronicDriver')
+        self.driver = self.compute.driver
+        self.mock_shutdown = self.useFixture(fixtures.MockPatchObject(
+            self.compute, '_shutdown_instance')).mock
+
+        self.instance = objects.Instance(
+            self.ctx, uuid=uuids.instance, host=self.host,
+            project_id='project', user_id='user', vm_state=vm_states.ACTIVE)
+        self.instance.create()
+
+        # Ironic has one active node, provisioned with the instance.
+        node = _get_cached_node(
+            id=uuids.node, instance_id=uuids.instance,
+            provision_state=ironic_states.ACTIVE)
+        self.mock_conn = self.useFixture(fixtures.MockPatchObject(
+            self.driver, '_ironic_connection')).mock
+        self.mock_conn.nodes.return_value = [node]
+
+    def _refresh_node_cache(self):
+        # As nova-compute does at startup and in every
+        # update_available_resource run.
+        self.driver.get_available_nodes()
+
+    def _local_delete(self):
+        # As nova-api does when nova-compute is down: delete the instance
+        # from the database without contacting Ironic.
+        self.instance.destroy()
+
+    def _list_instance_uuids_before_fa3cf7d50c(self):
+        """IronicDriver.list_instance_uuids() as it was before fa3cf7d50c."""
+        return [node.instance_id for node in self.driver._get_node_list(
+            associated=True, fields=('instance_id',))]
+
+    def test_cleanup_running_deleted_instances_local_delete(self):
+        """Test that a node left active by a local delete is unprovisioned.
+
+        When nova-compute is down, nova-api deletes an instance from the
+        database only (a local delete), so its Ironic node stays active.
+        Only the Ironic API and ComputeManager._shutdown_instance, where
+        unprovisioning would start, are mocked.
+        """
+        self._refresh_node_cache()
+        self.assertEqual([uuids.instance], self.driver.list_instance_uuids())
+
+        self._local_delete()
+        self._refresh_node_cache()
+        self.compute._cleanup_running_deleted_instances(self.ctx)
+
+        # Fails since fa3cf7d50c: _refresh_cache() drops the node once its
+        # instance is deleted, so list_instance_uuids() no longer returns it.
+        self.mock_shutdown.assert_called_once()
+
+    def test_cleanup_running_deleted_instances_local_delete_before_fa3cf7d50c(
+            self):
+        """Test the same local delete with list_instance_uuids() as it was
+        before fa3cf7d50c.
+        """
+        self.driver.list_instance_uuids = (
+            self._list_instance_uuids_before_fa3cf7d50c)
+
+        self._refresh_node_cache()
+        self.assertEqual([uuids.instance], self.driver.list_instance_uuids())
+
+        self._local_delete()
+        self._refresh_node_cache()
+        self.compute._cleanup_running_deleted_instances(self.ctx)
+
+        self.mock_shutdown.assert_called_once()
 
 
 class IronicDriverConsoleTestCase(test.NoDBTestCase):
