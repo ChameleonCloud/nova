@@ -190,6 +190,7 @@ class IronicDriver(virt_driver.ComputeDriver):
         super().__init__(virtapi)
 
         self.node_cache = {}
+        self.running_deleted_instance_uuids = []
         self.node_cache_time = 0
         self.servicegroup_api = servicegroup.API()
 
@@ -663,6 +664,10 @@ class IronicDriver(virt_driver.ComputeDriver):
     def list_instance_uuids(self):
         """Return the IDs of all the instances provisioned.
 
+        This includes instances deleted from this host while this service was
+        down, whose nodes are still provisioned, so that
+        ComputeManager._cleanup_running_deleted_instances can clean them up.
+
         :returns: a list of instance IDs.
         :raises: VirtDriverNotReady
 
@@ -670,9 +675,10 @@ class IronicDriver(virt_driver.ComputeDriver):
         if not self.node_cache:
             self._refresh_cache()
 
-        return [node.instance_id
-                for node in self.node_cache.values()
-                if node.instance_id is not None]
+        instance_uuids = [node.instance_id
+                          for node in self.node_cache.values()
+                          if node.instance_id is not None]
+        return instance_uuids + self.running_deleted_instance_uuids
 
     def node_is_available(self, nodename):
         """Confirms a Nova hypervisor node exists in the Ironic inventory.
@@ -815,6 +821,7 @@ class IronicDriver(virt_driver.ComputeDriver):
         # to be orphaned and associated resource provider to be deleted.
         instances = objects.InstanceList.get_uuids_by_host(ctxt, CONF.host)
 
+        other_instance_uuids = []
         for node in nodes:
             # NOTE(jroll): we always manage the nodes for instances we manage
             if node.instance_id in instances:
@@ -823,16 +830,31 @@ class IronicDriver(virt_driver.ComputeDriver):
             # NOTE(jroll): check if the node matches us in the hash ring, and
             # does not have an instance_id (which would imply the node has
             # an instance managed by another compute service).
-            # Note that this means nodes with an instance that was deleted in
-            # nova while the service was down, and not yet reaped, will not be
-            # reported until the periodic task cleans it up.
             elif (node.instance_id is None and
                   CONF.host.lower() in
                   self.hash_ring.get_nodes(node.id.encode('utf-8'))):
                 node_cache[node.id] = node
 
+            # The node's instance is managed by another compute service, or
+            # was deleted from this host while this service was down. We do
+            # not manage the node either way.
+            elif node.instance_id is not None:
+                other_instance_uuids.append(node.instance_id)
+
         self.node_cache = node_cache
+        self.running_deleted_instance_uuids = (
+            self._get_deleted_instance_uuids(ctxt, other_instance_uuids))
         self.node_cache_time = time.time()
+
+    def _get_deleted_instance_uuids(self, ctxt, instance_uuids):
+        """Return those of instance_uuids that were deleted from this host."""
+        if not instance_uuids:
+            return []
+
+        filters = {'uuid': instance_uuids, 'host': CONF.host, 'deleted': True}
+        with utils.temporary_mutation(ctxt, read_deleted='yes'):
+            instances = objects.InstanceList.get_by_filters(ctxt, filters)
+        return [instance.uuid for instance in instances]
 
     def get_available_nodes(self, refresh=False):
         """Returns the UUIDs of Ironic nodes managed by this compute service.
