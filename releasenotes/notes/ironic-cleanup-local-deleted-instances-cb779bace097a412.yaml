@@ -1,0 +1,19 @@
+---
+fixes:
+  - |
+    With the ironic driver, a node whose instance was deleted while its
+    nova-compute service was down stayed provisioned: the
+    ``_cleanup_running_deleted_instances`` periodic task never found it, so
+    the node was never unprovisioned and could not be scheduled to. The
+    periodic task now finds these nodes and handles them according to
+    ``[DEFAULT]running_deleted_instance_action``. For more details, see
+    `bug NNNNNNN <https://bugs.launchpad.net/nova/+bug/NNNNNNN>`__.
+upgrade:
+  - |
+    After upgrading, the first ``_cleanup_running_deleted_instances`` run of
+    each nova-compute service using the ironic driver, shortly after it
+    starts, acts on any nodes already left provisioned for instances deleted
+    while the service was down. With the default
+    ``[DEFAULT]running_deleted_instance_action = reap``, those nodes are
+    unprovisioned. To review them first, set the option to ``log`` before
+    upgrading.

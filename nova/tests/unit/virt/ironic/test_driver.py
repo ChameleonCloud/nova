@@ -649,6 +649,17 @@ class IronicDriverTestCase(test.NoDBTestCase):
 
         self.assertEqual(sorted(expected), sorted(instance_uuids))
 
+    def test_list_instance_uuids_running_deleted_instances(self):
+        instance_uuid = uuidutils.generate_uuid()
+        deleted_instance_uuid = uuidutils.generate_uuid()
+        node = _get_cached_node(
+            id=uuidutils.generate_uuid(), instance_id=instance_uuid)
+        self.driver.node_cache = {node.id: node}
+        self.driver.running_deleted_instance_uuids = [deleted_instance_uuid]
+
+        self.assertEqual([instance_uuid, deleted_instance_uuid],
+                         self.driver.list_instance_uuids())
+
     @mock.patch.object(ironic_driver.IronicDriver, '_refresh_cache')
     def test_list_instance_uuids_fail(self, mock_cache):
         mock_cache.side_effect = exception.VirtDriverNotReady
@@ -773,9 +784,11 @@ class IronicDriverTestCase(test.NoDBTestCase):
             provision_state=ironic_states.AVAILABLE)
         self.assertFalse(self.driver._node_resources_used(unused_node))
 
+    @mock.patch.object(objects.InstanceList, 'get_by_filters',
+                       return_value=[])
     @mock.patch.object(objects.ServiceList, 'get_all_computes_by_hv_type')
     @mock.patch.object(objects.InstanceList, 'get_uuids_by_host')
-    def test_get_available_nodes(self, mock_gi, mock_services):
+    def test_get_available_nodes(self, mock_gi, mock_services, mock_deleted):
         instance = fake_instance.fake_instance_obj(self.ctx,
                                                    uuid=self.instance_uuid)
         mock_gi.return_value = [instance.uuid]
@@ -3255,6 +3268,7 @@ class NodeCacheTestCase(test.NoDBTestCase):
         self.host = 'host1'
         self.flags(host=self.host)
 
+    @mock.patch.object(objects.InstanceList, 'get_by_filters')
     @mock.patch.object(ironic_driver.IronicDriver, '_can_send_version')
     @mock.patch.object(ironic_driver.IronicDriver, '_refresh_hash_ring')
     @mock.patch.object(hash_ring.HashRing, 'get_nodes')
@@ -3262,10 +3276,11 @@ class NodeCacheTestCase(test.NoDBTestCase):
     @mock.patch.object(objects.InstanceList, 'get_uuids_by_host')
     def _test__refresh_cache(self, instances, nodes, hosts, mock_instances,
                              mock_nodes, mock_hosts, mock_hash_ring,
-                             mock_can_send, partition_key=None,
+                             mock_can_send, mock_deleted, partition_key=None,
                              can_send_146=True, shard=None,
-                             can_send_182=True):
+                             can_send_182=True, deleted_instances=()):
         mock_instances.return_value = instances
+        mock_deleted.return_value = deleted_instances
         mock_nodes.return_value = nodes
         mock_hosts.side_effect = hosts
         parent_mock = mock.MagicMock()
@@ -3303,6 +3318,7 @@ class NodeCacheTestCase(test.NoDBTestCase):
         mock_nodes.assert_called_once_with(fields=ironic_driver._NODE_FIELDS,
                                            **kwargs)
         self.assertIsNotNone(self.driver.node_cache_time)
+        return mock_deleted
 
     def test__refresh_cache_same_host_different_case(self):
         # Test that we treat Host1 and host1 as the same host
@@ -3512,6 +3528,42 @@ class NodeCacheTestCase(test.NoDBTestCase):
         expected_cache = {n.id: n for n in nodes[1:]}
         self.assertEqual(expected_cache, self.driver.node_cache)
 
+    def test__refresh_cache_running_deleted_instances(self):
+        # we should not manage a node whose instance was deleted from this
+        # host, but we should still list the instance so it is cleaned up
+        own_instance_uuid = uuidutils.generate_uuid()
+        deleted_instance = objects.Instance(uuid=uuidutils.generate_uuid())
+        other_instance_uuid = uuidutils.generate_uuid()
+        nodes = [
+            _get_cached_node(
+                id=uuidutils.generate_uuid(), instance_id=own_instance_uuid),
+            _get_cached_node(
+                id=uuidutils.generate_uuid(),
+                instance_id=deleted_instance.uuid),
+            _get_cached_node(
+                id=uuidutils.generate_uuid(),
+                instance_id=other_instance_uuid),
+        ]
+        hosts = []
+
+        mock_deleted = self._test__refresh_cache(
+            [own_instance_uuid], nodes, hosts,
+            deleted_instances=[deleted_instance])
+
+        self.assertEqual({nodes[0].id: nodes[0]}, self.driver.node_cache)
+        self.assertEqual([deleted_instance.uuid],
+                         self.driver.running_deleted_instance_uuids)
+        mock_deleted.assert_called_once_with(
+            mock.ANY, {'uuid': [deleted_instance.uuid, other_instance_uuid],
+                       'host': self.host, 'deleted': True})
+
+    @mock.patch.object(objects.InstanceList, 'get_by_filters')
+    def test__get_deleted_instance_uuids_no_instances(
+            self, mock_get_by_filters):
+        self.assertEqual(
+            [], self.driver._get_deleted_instance_uuids(self.ctx, []))
+        mock_get_by_filters.assert_not_called()
+
 
 class LocalDeleteTestCase(test.TestCase):
 
@@ -3550,38 +3602,15 @@ class LocalDeleteTestCase(test.TestCase):
         # from the database without contacting Ironic.
         self.instance.destroy()
 
-    def _list_instance_uuids_before_fa3cf7d50c(self):
-        """IronicDriver.list_instance_uuids() as it was before fa3cf7d50c."""
-        return [node.instance_id for node in self.driver._get_node_list(
-            associated=True, fields=('instance_id',))]
-
     def test_cleanup_running_deleted_instances_local_delete(self):
         """Test that a node left active by a local delete is unprovisioned.
 
-        When nova-compute is down, nova-api deletes an instance from the
-        database only (a local delete), so its Ironic node stays active.
-        Only the Ironic API and ComputeManager._shutdown_instance, where
-        unprovisioning would start, are mocked.
+        Regression test for bug NNNNNNN. When nova-compute is down, nova-api
+        deletes an instance from the database only (a local delete), so its
+        Ironic node stays active. Only the Ironic API and
+        ComputeManager._shutdown_instance, where unprovisioning would start,
+        are mocked.
         """
-        self._refresh_node_cache()
-        self.assertEqual([uuids.instance], self.driver.list_instance_uuids())
-
-        self._local_delete()
-        self._refresh_node_cache()
-        self.compute._cleanup_running_deleted_instances(self.ctx)
-
-        # Fails since fa3cf7d50c: _refresh_cache() drops the node once its
-        # instance is deleted, so list_instance_uuids() no longer returns it.
-        self.mock_shutdown.assert_called_once()
-
-    def test_cleanup_running_deleted_instances_local_delete_before_fa3cf7d50c(
-            self):
-        """Test the same local delete with list_instance_uuids() as it was
-        before fa3cf7d50c.
-        """
-        self.driver.list_instance_uuids = (
-            self._list_instance_uuids_before_fa3cf7d50c)
-
         self._refresh_node_cache()
         self.assertEqual([uuids.instance], self.driver.list_instance_uuids())
 
