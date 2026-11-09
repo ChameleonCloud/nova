@@ -538,7 +538,8 @@ class ServerGroupTestV21(ServerGroupTestBase):
 
         self.assertEqual('Exceeded maximum number of retries. Exhausted all '
                          'hosts available for retrying build failures for '
-                         'instance %s.' % failed_server['id'],
+                         'instance %s. Last exception: Affinity instance '
+                         'group policy was violated' % failed_server['id'],
                          failed_server['fault']['message'])
 
         ctxt = context.get_admin_context()
@@ -573,7 +574,8 @@ class ServerGroupTestV21(ServerGroupTestBase):
 
         self.assertEqual('Exceeded maximum number of retries. Exhausted all '
                          'hosts available for retrying build failures for '
-                         'instance %s.' % failed_server['id'],
+                         'instance %s. Last exception: Anti-affinity instance '
+                         'group policy was violated' % failed_server['id'],
                          failed_server['fault']['message'])
 
         ctxt = context.get_admin_context()
