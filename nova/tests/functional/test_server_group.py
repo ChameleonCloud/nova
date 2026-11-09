@@ -277,7 +277,9 @@ class ServerGroupTestV21(ServerGroupTestBase):
                                                      flavor=flavor,
                                                      expected_status='ERROR')
         self.assertEqual('No valid host was found. '
-                         'There are not enough hosts available.',
+                         'There are not enough hosts available.  '
+                         'To troubleshoot, please see '
+                         'https://bit.ly/chi-faq-launch-fail',
                          failed_server['fault']['message'])
 
     def test_boot_servers_with_anti_affinity(self):
@@ -298,7 +300,9 @@ class ServerGroupTestV21(ServerGroupTestBase):
         failed_server = self._boot_a_server_to_group(created_group,
                                                      expected_status='ERROR')
         self.assertEqual('No valid host was found. '
-                         'There are not enough hosts available.',
+                         'There are not enough hosts available.  '
+                         'To troubleshoot, please see '
+                         'https://bit.ly/chi-faq-launch-fail',
                          failed_server['fault']['message'])
 
     def _rebuild_with_group(self, group):
@@ -931,7 +935,9 @@ class ServerGroupTestV264(ServerGroupTestV215):
         failed_server = self._boot_a_server_to_group(created_group,
                                                      expected_status='ERROR')
         self.assertEqual('No valid host was found. '
-                         'There are not enough hosts available.',
+                         'There are not enough hosts available.  '
+                         'To troubleshoot, please see '
+                         'https://bit.ly/chi-faq-launch-fail',
                          failed_server['fault']['message'])
 
         hosts = map(lambda x: x['OS-EXT-SRV-ATTR:host'],

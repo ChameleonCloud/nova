@@ -6,7 +6,7 @@
         "function_name": "_schedule_instances",
         "module_name": "nova.conductor.manager",
         "exception": "NoValidHost",
-        "exception_message": "No valid host was found. There are not enough hosts available.",
+        "exception_message": "No valid host was found. There are not enough hosts available.  To troubleshoot, please see https://bit.ly/chi-faq-launch-fail",
         "traceback": "Traceback (most recent call last):\n  File \"nova/conductor/manager.py\", line ..."
     }
 }
