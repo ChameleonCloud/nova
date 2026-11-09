@@ -10,13 +10,15 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import fixtures
+
 from nova.compute import api as compute_api
 from nova import context
 from nova import exception
 from nova import objects
 from nova import test
 from nova.tests import fixtures as nova_fixtures
-from nova.tests import uuidsentinel as uuids
+from oslo_utils.fixture import uuidsentinel as uuids
 
 
 class ComputeAggregateAPIMultiCellTestCase(test.NoDBTestCase):
@@ -28,6 +30,8 @@ class ComputeAggregateAPIMultiCellTestCase(test.NoDBTestCase):
 
     def setUp(self):
         super(ComputeAggregateAPIMultiCellTestCase, self).setUp()
+        self.useFixture(fixtures.MockPatch(
+            'nova.scheduler.client.report.report_client_singleton'))
         self.agg_api = compute_api.AggregateAPI()
         self.useFixture(nova_fixtures.Database(database='api'))
         celldbs = nova_fixtures.CellDatabases()
