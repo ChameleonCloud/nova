@@ -48,6 +48,7 @@ from nova.i18n import _
 from nova import objects
 from nova.objects import external_event as external_event_obj
 from nova.objects import fields as obj_fields
+from nova import service_auth
 from nova import servicegroup
 from nova import utils
 from nova.virt import configdrive
@@ -62,6 +63,10 @@ CONF = nova.conf.CONF
 
 # The API version required by the Ironic driver
 IRONIC_API_VERSION = (1, 46)
+
+# The API version from which ironic authorizes nova to validate and deploy a
+# node with its user's token
+IRONIC_USER_RELAY_VERSION = '1.116'
 
 _POWER_STATE_MAP = {
     ironic_states.POWER_ON: power_state.RUNNING,
@@ -149,6 +154,29 @@ def _check_peer_list():
                         'peer_list is now deprecated. We recommend moving '
                         'to just a single node in your peer list.')
 
+def _load_auth_plugin():
+    auth_plugin = service_auth.get_service_auth_plugin(
+                nova.conf.ironic.ironic_group.name)
+
+    if auth_plugin:
+        return auth_plugin
+
+    err_msg = _('Unknown auth type: %s') % CONF.ironic.auth_type
+    raise  sdk_exc.Unauthorized(message=err_msg)
+
+
+def _get_auth_plugin(context, admin=False):
+    if admin:
+        inner = _load_auth_plugin()         # admin
+    elif context.auth_token:
+        inner = context.get_auth_plugin()   # user
+    else:
+        # there is no identity to act on behalf of, and admin wasn't
+        # passed. Fail instead of authorizing as Nova.
+        raise exception.Unauthorized()
+
+    return service_auth.get_service_user_token_auth_plugin(
+        context, user_auth=inner)
 
 class IronicDriver(virt_driver.ComputeDriver):
     """Hypervisor driver for Ironic - bare metal provisioning."""
@@ -202,8 +230,21 @@ class IronicDriver(virt_driver.ComputeDriver):
             # service isn't ready yet. Consumers of ironic_connection are set
             # up to handle this and raise VirtDriverNotReady as appropriate.
             self._ironic_connection = utils.get_sdk_adapter(
-                'baremetal', admin=True, check_service=True)
+                'baremetal', admin=True, check_service=True,
+                ksa_auth=_get_auth_plugin(
+                    nova_context.get_admin_context(),
+                    admin=True)
+                )
         return self._ironic_connection
+
+    def _ironic_connection_as_user(self, context):
+        """Return a connection that sends the context's user to ironic."""
+        # Older ironic authorizes the user's token itself, so use nova's own.
+        if not sdk_utils.supports_microversion(
+                self.ironic_connection, IRONIC_USER_RELAY_VERSION):
+            return self.ironic_connection
+        return utils.get_sdk_adapter(
+            'baremetal', admin=False, ksa_auth=_get_auth_plugin(context))
 
     def _get_node(self, node_id):
         """Get a node by its UUID.
@@ -1208,7 +1249,7 @@ class IronicDriver(virt_driver.ComputeDriver):
         # validate we are ready to do the deploy
         # NOTE(stephenfin): we don't pass required since we have to do our own
         # validation
-        validate_chk = self.ironic_connection.validate_node(
+        validate_chk = self._ironic_connection_as_user(context).validate_node(
             node_id,
             required=None,
         )
@@ -1257,7 +1298,7 @@ class IronicDriver(virt_driver.ComputeDriver):
 
         # trigger the node deploy
         try:
-            self.ironic_connection.set_node_provision_state(
+            self._ironic_connection_as_user(context).set_node_provision_state(
                 node_id,
                 ironic_states.ACTIVE,
                 config_drive=configdrive_value,
@@ -1796,7 +1837,7 @@ class IronicDriver(virt_driver.ComputeDriver):
 
         # Trigger the node rebuild/redeploy.
         try:
-            self.ironic_connection.set_node_provision_state(
+            self._ironic_connection_as_user(context).set_node_provision_state(
                 node_id,
                 ironic_states.REBUILD,
                 config_drive=configdrive_value,

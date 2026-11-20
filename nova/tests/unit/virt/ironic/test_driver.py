@@ -110,6 +110,11 @@ class IronicDriverTestCase(test.NoDBTestCase):
 
         self.mock_conn = self.useFixture(
             fixtures.MockPatchObject(self.driver, '_ironic_connection')).mock
+        # Ironic predates IRONIC_USER_RELAY_VERSION unless a test says
+        # otherwise.
+        self.mock_supports_microversion = self.useFixture(
+            fixtures.MockPatch('openstack.utils.supports_microversion',
+                               return_value=False)).mock
 
         self.ctx = nova_context.get_admin_context()
 
@@ -1302,7 +1307,9 @@ class IronicDriverTestCase(test.NoDBTestCase):
                        '_add_instance_info_to_node')
     def _test_spawn(self, mock_aiitn, mock_wait_active,
                     mock_avti, mock_looping, mock_save,
-                    mock_metadata, config_drive_value=None):
+                    mock_metadata, config_drive_value=None, user_conn=None):
+        # The connection that should validate and deploy the node
+        deploy_conn = user_conn or self.mock_conn
         node_id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
         node = _get_cached_node(driver='fake', id=node_id)
         instance = fake_instance.fake_instance_obj(self.ctx, node=node_id)
@@ -1314,7 +1321,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
         instance.flavor = fake_flavor
 
         self.mock_conn.get_node.return_value = node
-        self.mock_conn.validate_node.return_value = \
+        deploy_conn.validate_node.return_value = \
             ironic_utils.get_test_validation()
 
         fake_looping_call = FakeLoopingCall()
@@ -1327,7 +1334,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
         self.mock_conn.get_node.assert_called_once_with(
             node_id, fields=ironic_driver._NODE_FIELDS,
         )
-        self.mock_conn.validate_node.assert_called_once_with(
+        deploy_conn.validate_node.assert_called_once_with(
             node_id, required=None,
         )
         mock_aiitn.assert_called_once_with(
@@ -1335,7 +1342,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
             fake_flavor, test.MatchType(driver.InstanceDriverMetadata),
             block_device_info=None)
         mock_avti.assert_called_once_with(self.ctx, instance, None)
-        self.mock_conn.set_node_provision_state.assert_called_once_with(
+        deploy_conn.set_node_provision_state.assert_called_once_with(
             node_id, 'active', config_drive=config_drive_value,
         )
 
@@ -1355,6 +1362,15 @@ class IronicDriverTestCase(test.NoDBTestCase):
         self._test_spawn()
         # assert configdrive was not generated
         self.assertFalse(mock_configdrive.called)
+
+    @mock.patch.object(ironic_driver.IronicDriver,
+                       '_ironic_connection_as_user')
+    @mock.patch.object(configdrive, 'required_by', return_value=False)
+    def test_spawn_as_user(self, mock_required_by, mock_as_user):
+        self._test_spawn(user_conn=mock_as_user.return_value)
+        mock_as_user.assert_called_with(self.ctx)
+        self.mock_conn.validate_node.assert_not_called()
+        self.mock_conn.set_node_provision_state.assert_not_called()
 
     @mock.patch.object(ironic_driver.IronicDriver, '_generate_configdrive')
     @mock.patch.object(configdrive, 'required_by')
@@ -2351,7 +2367,9 @@ class IronicDriverTestCase(test.NoDBTestCase):
     def _test_rebuild(self, mock_save, mock_add_instance_info,
                       mock_looping, mock_wait_active, mock_metadata,
                       preserve=False, reimage_boot_volume=False,
-                      block_device_info=None):
+                      block_device_info=None, user_conn=None):
+        # The connection that should rebuild the node
+        deploy_conn = user_conn or self.mock_conn
         node_uuid = uuidutils.generate_uuid()
         node = _get_cached_node(id=node_uuid, instance_id=self.instance_id)
         self.mock_conn.get_node.return_value = node
@@ -2387,7 +2405,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
             flavor,
             test.MatchType(driver.InstanceDriverMetadata),
             preserve_ephemeral=preserve)
-        self.mock_conn.set_node_provision_state.assert_called_once_with(
+        deploy_conn.set_node_provision_state.assert_called_once_with(
             node_uuid, ironic_states.REBUILD, config_drive=mock.ANY,
         )
         mock_looping.assert_called_once_with(mock_wait_active, instance)
@@ -2410,6 +2428,14 @@ class IronicDriverTestCase(test.NoDBTestCase):
                                            mock_configdrive):
         mock_required_by.return_value = False
         self._test_rebuild(preserve=False)
+
+    @mock.patch.object(ironic_driver.IronicDriver,
+                       '_ironic_connection_as_user')
+    @mock.patch.object(configdrive, 'required_by', return_value=False)
+    def test_rebuild_as_user(self, mock_required_by, mock_as_user):
+        self._test_rebuild(user_conn=mock_as_user.return_value)
+        mock_as_user.assert_called_once_with(self.ctx)
+        self.mock_conn.set_node_provision_state.assert_not_called()
 
     @mock.patch.object(ironic_driver.IronicDriver, '_generate_configdrive')
     @mock.patch.object(configdrive, 'required_by')
@@ -2911,18 +2937,35 @@ class IronicDriverSyncTestCase(IronicDriverTestCase):
             self.driver.unrescue, self.ctx, instance,
         )
 
-    @mock.patch('openstack.utils.supports_microversion')
-    def test__can_send_version(self, mock_supports_microversion):
-        mock_supports_microversion.return_value = True
+    def test__ironic_connection_as_user_old_ironic(self):
+        conn = self.driver._ironic_connection_as_user(self.ctx)
+
+        self.assertIs(self.mock_conn, conn)
+        self.mock_supports_microversion.assert_called_once_with(
+            self.mock_conn, ironic_driver.IRONIC_USER_RELAY_VERSION)
+
+    @mock.patch('nova.utils.get_sdk_adapter')
+    @mock.patch.object(ironic_driver, '_get_auth_plugin')
+    def test__ironic_connection_as_user(self, mock_auth, mock_adapter):
+        self.mock_supports_microversion.return_value = True
+
+        conn = self.driver._ironic_connection_as_user(self.ctx)
+
+        self.assertIs(mock_adapter.return_value, conn)
+        mock_auth.assert_called_once_with(self.ctx)
+        mock_adapter.assert_called_once_with(
+            'baremetal', admin=False, ksa_auth=mock_auth.return_value)
+
+    def test__can_send_version(self):
+        self.mock_supports_microversion.return_value = True
 
         version = '%d.%d' % ironic_driver.IRONIC_API_VERSION
         self.assertIsNone(
             self.driver._can_send_version(version)
         )
 
-    @mock.patch('openstack.utils.supports_microversion')
-    def test__can_send_version_too_new(self, mock_supports_microversion):
-        mock_supports_microversion.return_value = False
+    def test__can_send_version_too_new(self):
+        self.mock_supports_microversion.return_value = False
 
         version = '%d.%d' % (
             ironic_driver.IRONIC_API_VERSION[0],
